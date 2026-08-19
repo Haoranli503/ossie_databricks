@@ -116,9 +116,8 @@ python3 -m pytest tests/
 Example-based unit tests plus Hypothesis property-based round-trip tests
 (`test_roundtrip_properties.py`, which skip if `hypothesis` is not installed).
 
-## Future effort
+## Status
 
-Both the Apache Ossie specification and the Databricks Unity Catalog Metric View YAML are still
-evolving. As either side adds or changes fields, this converter will be updated to track
-them -- extending the mapping and coverage in both directions to keep the conversion
-current and to support as much as each format allows over time.
+This Python implementation is the original reference and is **deprecated** in favor of the Java
+converter under [`../java/`](../java/), which is the maintained implementation. New behavior and
+fixes land in Java; this copy is kept for reference and is no longer actively extended.
