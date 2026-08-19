@@ -1,0 +1,774 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.ossie.converter.databricks;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+
+import org.junit.jupiter.api.Test;
+
+/**
+ * Example-based tests for the Apache Ossie &lt;-&gt; Metric View converter, plus the fixture
+ * comparisons that pin the expected output of both directions.
+ */
+public class OssieConverterSuite {
+
+  private static Object export(String osi, String source) {
+    return OssieConverter.parseYaml(
+        OssieConverter.convertOssieToMetricView(osi, source).yaml);
+  }
+
+  @Test
+  public void fixtureAStarSchemaExportsToExpectedMetricView() {
+    String osi =
+        "version: \"0.2.0.dev0\"\n"
+        + "semantic_model:\n"
+        + "  - name: sales\n"
+        + "    description: Sales orders with customer attributes\n"
+        + "    datasets:\n"
+        + "      - name: orders\n"
+        + "        source: samples.tpch.orders\n"
+        + "        primary_key: [o_orderkey]\n"
+        + "        description: One row per order\n"
+        + "        fields:\n"
+        + "          - name: o_orderkey\n"
+        + "            expression:\n"
+        + "              dialects:\n"
+        + "                - dialect: DATABRICKS\n"
+        + "                  expression: o_orderkey\n"
+        + "            description: Order identifier\n"
+        + "          - name: o_orderdate\n"
+        + "            expression:\n"
+        + "              dialects:\n"
+        + "                - dialect: DATABRICKS\n"
+        + "                  expression: o_orderdate\n"
+        + "            label: Order Date\n"
+        + "            ai_context:\n"
+        + "              synonyms: [order date, date]\n"
+        + "      - name: customer\n"
+        + "        source: samples.tpch.customer\n"
+        + "        primary_key: [c_custkey]\n"
+        + "        fields:\n"
+        + "          - name: c_name\n"
+        + "            expression:\n"
+        + "              dialects:\n"
+        + "                - dialect: DATABRICKS\n"
+        + "                  expression: c_name\n"
+        + "            description: Customer name\n"
+        + "    relationships:\n"
+        + "      - name: orders_to_customer\n"
+        + "        from: orders\n"
+        + "        to: customer\n"
+        + "        from_columns: [o_custkey]\n"
+        + "        to_columns: [c_custkey]\n"
+        + "    metrics:\n"
+        + "      - name: total_revenue\n"
+        + "        expression:\n"
+        + "          dialects:\n"
+        + "            - dialect: DATABRICKS\n"
+        + "              expression: SUM(o_totalprice)\n"
+        + "        description: Total order revenue\n"
+        + "        ai_context:\n"
+        + "          synonyms: [revenue, total revenue, sales]\n"
+        + "      - name: order_count\n"
+        + "        expression:\n"
+        + "          dialects:\n"
+        + "            - dialect: DATABRICKS\n"
+        + "              expression: COUNT(*)\n"
+        + "        description: Number of orders\n";
+
+    String expected =
+        "version: '1.1'\n"
+        + "source: samples.tpch.orders\n"
+        + "comment: Sales orders with customer attributes\n"
+        + "joins:\n"
+        + "- name: customer\n"
+        + "  source: samples.tpch.customer\n"
+        + "  on: source.o_custkey = customer.c_custkey\n"
+        + "  rely:\n"
+        + "    at_most_one_match: true\n"
+        + "dimensions:\n"
+        + "- name: o_orderkey\n"
+        + "  expr: o_orderkey\n"
+        + "  comment: Order identifier\n"
+        + "- name: o_orderdate\n"
+        + "  expr: o_orderdate\n"
+        + "  display_name: Order Date\n"
+        + "  synonyms:\n"
+        + "  - order date\n"
+        + "  - date\n"
+        + "- name: c_name\n"
+        + "  expr: customer.c_name\n"
+        + "  comment: Customer name\n"
+        + "measures:\n"
+        + "- name: total_revenue\n"
+        + "  expr: SUM(o_totalprice)\n"
+        + "  comment: Total order revenue\n"
+        + "  synonyms:\n"
+        + "  - revenue\n"
+        + "  - total revenue\n"
+        + "  - sales\n"
+        + "- name: order_count\n"
+        + "  expr: COUNT(*)\n"
+        + "  comment: Number of orders\n";
+
+    assertEquals(OssieConverter.parseYaml(expected), export(osi, null));
+  }
+
+  @Test
+  public void unsupportedVersionIsRejected() {
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertOssieToMetricView("version: '9.9'\nsemantic_model: []\n", null));
+    assertTrue(e.getMessage().contains("Unsupported Apache Ossie version"));
+  }
+
+  @Test
+  public void multipleCandidateFactsWithoutSourceIsRejected() {
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - {name: orders, source: c.s.orders}\n"
+        + "  - {name: returns, source: c.s.returns}\n"
+        + "  - {name: customer, source: c.s.customer, primary_key: [c_custkey]}\n"
+        + "  relationships:\n"
+        + "  - {name: oc, from: orders, to: customer, from_columns: [o_custkey], to_columns: [c_custkey]}\n"
+        + "  - {name: rc, from: returns, to: customer, from_columns: [re_custkey], to_columns: [c_custkey]}\n";
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertOssieToMetricView(osi, null));
+    assertTrue(e.getMessage().contains("multiple candidate fact datasets"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void oneToManyEmitsCardinality() {
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: orders\n"
+        + "    source: c.s.orders\n"
+        + "    primary_key: [o_orderkey]\n"
+        + "    fields:\n"
+        + "    - {name: o_orderstatus, expression: {dialects: [{dialect: DATABRICKS, expression: o_orderstatus}]}}\n"
+        + "  - name: lineitem\n"
+        + "    source: c.s.lineitem\n"
+        + "  relationships:\n"
+        + "  - {name: lio, from: lineitem, to: orders, from_columns: [l_orderkey], to_columns: [o_orderkey]}\n"
+        + "  metrics:\n"
+        + "  - {name: qty, expression: {dialects: [{dialect: DATABRICKS, expression: SUM(lineitem.l_quantity)}]}}\n";
+    Map<String, Object> view = (Map<String, Object>) export(osi, "orders");
+    List<Object> joins = (List<Object>) view.get("joins");
+    Map<String, Object> join = (Map<String, Object>) joins.get(0);
+    assertEquals("one_to_many", join.get("cardinality"));
+  }
+
+  @Test
+  public void oneToManyNestedUnderManyToOneIsRejected() {
+    // A Metric View requires one cardinality per top-level branch, so a one-to-many join nested
+    // under a many-to-one parent is rejected by Databricks just as the reverse nesting is. Fact
+    // `d`; `f -> d` points at d (many-to-one from d's perspective), and `g -> f` points away from
+    // f (one-to-many), which would nest one_to_many inside the many-to-one branch.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.d\n"
+        + "    fields:\n"
+        + "    - {name: dcol, expression: {dialects: [{dialect: DATABRICKS, expression: dcol}]}}\n"
+        + "  - name: f\n"
+        + "    source: c.s.f\n"
+        + "    primary_key: [fk]\n"
+        + "  - name: g\n"
+        + "    source: c.s.g\n"
+        + "  relationships:\n"
+        + "  - {name: df, from: d, to: f, from_columns: [fk], to_columns: [fk]}\n"
+        + "  - {name: gf, from: g, to: f, from_columns: [fk], to_columns: [fk]}\n"
+        + "  metrics:\n"
+        + "  - {name: c, expression: {dialects: [{dialect: DATABRICKS, expression: COUNT(1)}]}}\n";
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertOssieToMetricView(osi, "d"));
+    assertTrue(e.getMessage().contains("share the same cardinality"),
+        "expected a mixed-cardinality rejection, got: " + e.getMessage());
+  }
+
+  @Test
+  public void directedCycleWithNoEquidistantEdgeIsRejected() {
+    // a -> b -> c -> d -> e -> b with fact `a`: every edge spans adjacent BFS levels, so the
+    // equidistance heuristic sees nothing, and `a` has zero incoming edges so pickFact finds a
+    // root. Without a real acyclicity check this expanded into duplicate join paths (`d` under
+    // both `c` and `e`), fabricating a tree from a cyclic model.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: a\n"
+        + "    source: c.s.a\n"
+        + "    fields:\n"
+        + "    - {name: acol, expression: {dialects: [{dialect: DATABRICKS, expression: acol}]}}\n"
+        + "  - name: b\n"
+        + "    source: c.s.b\n"
+        + "  - name: c\n"
+        + "    source: c.s.c\n"
+        + "  - name: d\n"
+        + "    source: c.s.d\n"
+        + "  - name: e\n"
+        + "    source: c.s.e\n"
+        + "  relationships:\n"
+        + "  - {name: ab, from: a, to: b, from_columns: [k], to_columns: [k]}\n"
+        + "  - {name: bc, from: b, to: c, from_columns: [k], to_columns: [k]}\n"
+        + "  - {name: cd, from: c, to: d, from_columns: [k], to_columns: [k]}\n"
+        + "  - {name: de, from: d, to: e, from_columns: [k], to_columns: [k]}\n"
+        + "  - {name: eb, from: e, to: b, from_columns: [k], to_columns: [k]}\n";
+    OssieConverter.ConversionException ex = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertOssieToMetricView(osi, "a"));
+    assertTrue(ex.getMessage().contains("directed cycle"),
+        "expected a directed-cycle rejection, got: " + ex.getMessage());
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void diamondIsStillAcceptedByTheCycleCheck() {
+    // A diamond (`a -> b -> d` plus `a -> c -> d`) is an UNDIRECTED cycle but directed-acyclic, and
+    // is supported via the fan-out aliases. The cycle check must not reject it.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: a\n"
+        + "    source: c.s.a\n"
+        + "  - name: b\n"
+        + "    source: c.s.b\n"
+        + "  - name: c\n"
+        + "    source: c.s.c\n"
+        + "  - name: d\n"
+        + "    source: c.s.d\n"
+        + "    fields:\n"
+        + "    - {name: dcol, expression: {dialects: [{dialect: DATABRICKS, expression: dcol}]}}\n"
+        + "  relationships:\n"
+        + "  - {name: ab, from: a, to: b, from_columns: [k], to_columns: [k]}\n"
+        + "  - {name: ac, from: a, to: c, from_columns: [k], to_columns: [k]}\n"
+        + "  - {name: bd, from: b, to: d, from_columns: [k], to_columns: [k]}\n"
+        + "  - {name: cd, from: c, to: d, from_columns: [k], to_columns: [k]}\n";
+    Map<String, Object> view = (Map<String, Object>) export(osi, "a");
+    assertEquals("c.s.a", view.get("source"));
+    // `d` is reached by two paths, so its column is emitted once per fan-out alias.
+    List<Object> dims = (List<Object>) view.get("dimensions");
+    assertEquals(2, dims.size(), "diamond should fan out to one dimension per path, got: " + dims);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void nestedJoinColumnInMeasureGetsFullAliasPath() {
+    // orders -> customer -> nation: `nation` nests under `customer`, so its columns are addressed
+    // as `customer.nation.col`. A bare `nation.` head would be read as struct access on a
+    // parameter, so the measure must be re-qualified -- and identically to the dimension path,
+    // which already emits `customer.nation.population` for the same column.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: orders\n"
+        + "    source: c.s.orders\n"
+        + "  - name: customer\n"
+        + "    source: c.s.customer\n"
+        + "    primary_key: [c_custkey]\n"
+        + "  - name: nation\n"
+        + "    source: c.s.nation\n"
+        + "    primary_key: [n_nationkey]\n"
+        + "    fields:\n"
+        + "    - {name: population, expression: {dialects: [{dialect: DATABRICKS, expression: population}]}}\n"
+        + "  relationships:\n"
+        + "  - {name: oc, from: orders, to: customer, from_columns: [c_custkey], to_columns: [c_custkey]}\n"
+        + "  - {name: cn, from: customer, to: nation, from_columns: [n_nationkey], to_columns: [n_nationkey]}\n"
+        + "  metrics:\n"
+        + "  - {name: pop, expression: {dialects: [{dialect: DATABRICKS, expression: SUM(nation.population)}]}}\n";
+    Map<String, Object> view = (Map<String, Object>) export(osi, "orders");
+
+    List<Object> dims = (List<Object>) view.get("dimensions");
+    Map<String, Object> dim = (Map<String, Object>) dims.get(0);
+    assertEquals("customer.nation.population", dim.get("expr"),
+        "dimension path should qualify with the full alias path");
+
+    List<Object> measures = (List<Object>) view.get("measures");
+    Map<String, Object> measure = (Map<String, Object>) measures.get(0);
+    assertEquals("SUM(customer.nation.population)", measure.get("expr"),
+        "measure must use the same full alias path as the dimension, not a bare nested alias");
+  }
+
+  @Test
+  public void modelWithNoFieldsOrMetricsIsRejected() {
+    // A Metric View requires at least one dimension or measure, so emitting a version+source-only
+    // view would just fail at CREATE. Fail at conversion time instead.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.d\n";
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertOssieToMetricView(osi, null));
+    assertTrue(e.getMessage().contains("no dimensions or measures"),
+        "expected an empty-view rejection, got: " + e.getMessage());
+  }
+
+  @Test
+  public void emptyAfterDropsNamesTheDroppedColumns() {
+    // Here the input is non-empty but everything drops: the only metric has no DATABRICKS/ANSI_SQL
+    // dialect. The error must name the dropped column so the cause is actionable, since after the
+    // cascade the emptiness is a consequence of the drop rather than an empty input.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.d\n"
+        + "  metrics:\n"
+        + "  - {name: only_metric, expression: {dialects: [{dialect: SNOWFLAKE, expression: SUM(x)}]}}\n";
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertOssieToMetricView(osi, null));
+    assertTrue(e.getMessage().contains("no dimensions or measures"),
+        "expected an empty-view rejection, got: " + e.getMessage());
+    assertTrue(e.getMessage().contains("only_metric"),
+        "the message must name the dropped column, got: " + e.getMessage());
+  }
+
+  @Test
+  public void duplicateDimensionNameIsRejected() {
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: orders\n"
+        + "    source: c.s.orders\n"
+        + "    fields:\n"
+        + "    - {name: id, expression: {dialects: [{dialect: DATABRICKS, expression: id}]}}\n"
+        + "  - name: customer\n"
+        + "    source: c.s.customer\n"
+        + "    fields:\n"
+        + "    - {name: id, expression: {dialects: [{dialect: DATABRICKS, expression: id}]}}\n"
+        + "  relationships:\n"
+        + "  - {name: r, from: orders, to: customer, from_columns: [cid], to_columns: [id]}\n";
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertOssieToMetricView(osi, null));
+    assertTrue(e.getMessage().contains("collides"));
+  }
+
+  @Test
+  public void foreignVendorExtensionDroppedWithNotice() {
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  custom_extensions:\n"
+        + "  - {vendor_name: SNOWFLAKE, data: '{}'}\n"
+        + "  datasets:\n"
+        + "  - name: orders\n"
+        + "    source: c.s.orders\n"
+        + "    fields:\n"
+        + "    - {name: s, expression: {dialects: [{dialect: DATABRICKS, expression: s}]}}\n"
+        + "  metrics:\n"
+        + "  - {name: n, expression: {dialects: [{dialect: DATABRICKS, expression: COUNT(*)}]}}\n";
+    OssieConverter.Result r = OssieConverter.convertOssieToMetricView(osi, null);
+    assertTrue(r.notices.stream().anyMatch(m -> m.contains("foreign-vendor custom_extensions dropped")));
+  }
+
+  // -- import direction (Metric View -> Apache Ossie) -----------------------
+
+  private static Object importMv(String mv) {
+    return OssieConverter.parseYaml(
+        OssieConverter.convertMetricViewToOssie(mv, null).yaml);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void importDecomposesJoinIntoRelationship() {
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "joins:\n"
+        + "- name: customer\n"
+        + "  source: c.s.customer\n"
+        + "  on: source.o_custkey = customer.c_custkey\n"
+        + "  rely: {at_most_one_match: true}\n"
+        + "dimensions:\n"
+        + "- {name: o_status, expr: o_orderstatus}\n"
+        + "- {name: c_name, expr: customer.c_name}\n"
+        + "measures:\n"
+        + "- {name: revenue, expr: SUM(o_totalprice)}\n";
+    Map<String, Object> out = (Map<String, Object>) importMv(mv);
+    List<Object> models = (List<Object>) out.get("semantic_model");
+    Map<String, Object> model = (Map<String, Object>) models.get(0);
+    List<Object> rels = (List<Object>) model.get("relationships");
+    Map<String, Object> rel = (Map<String, Object>) rels.get(0);
+    assertEquals("orders", rel.get("from"));
+    assertEquals("customer", rel.get("to"));
+    assertEquals(List.of("o_custkey"), rel.get("from_columns"));
+    assertEquals(List.of("c_custkey"), rel.get("to_columns"));
+  }
+
+  @Test
+  public void importRejectsNonEquiJoin() {
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "joins:\n"
+        + "- name: customer\n"
+        + "  source: c.s.customer\n"
+        + "  on: source.o_custkey >= customer.c_custkey\n";
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertMetricViewToOssie(mv, null));
+    assertTrue(e.getMessage().contains("non-equi or unsupported"));
+  }
+
+  @Test
+  public void importRejectsCrossJoin() {
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "joins:\n"
+        + "- name: customer\n"
+        + "  source: c.s.customer\n";
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertMetricViewToOssie(mv, null));
+    assertTrue(e.getMessage().contains("no join condition"));
+  }
+
+  @Test
+  public void importRejectsUnsupportedVersion() {
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertMetricViewToOssie("version: '0.1'\nsource: c.s.t\n", null));
+    assertTrue(e.getMessage().contains("Unsupported Metric View version"));
+  }
+
+  @Test
+  public void mvToOssieToMvRoundTripsStash() {
+    // A view with MV-only features (filter/rely/format/window) must survive
+    // MV -> Ossie -> MV unchanged (the custom_extensions stash carries them).
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "filter: o_orderstatus = 'F'\n"
+        + "joins:\n"
+        + "- name: customer\n"
+        + "  source: c.s.customer\n"
+        + "  on: source.o_custkey = customer.c_custkey\n"
+        + "  rely:\n"
+        + "    at_most_one_match: true\n"
+        + "dimensions:\n"
+        + "- name: net\n"
+        + "  expr: o_totalprice\n"
+        + "  format:\n"
+        + "    type: currency\n"
+        + "    currency_code: USD\n"
+        + "measures:\n"
+        + "- name: running\n"
+        + "  expr: SUM(o_totalprice)\n"
+        + "  window:\n"
+        + "  - order: net\n"
+        + "    semiadditive: last\n"
+        + "    range: cumulative\n";
+    String ossie = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
+    String back = OssieConverter.convertOssieToMetricView(ossie, null).yaml;
+    assertEquals(OssieConverter.parseYaml(mv), OssieConverter.parseYaml(back));
+  }
+
+  // -- fixture comparisons ---------------------------------------------------
+  // The fixtures under src/test/resources/ossie_*.yaml pin the expected outputs
+  // checked into apache/ossie. Asserting the Java output parses equal to them (structure
+  // + stash blob STRINGS) is the real "one behavior, two implementations" guarantee --
+  // it catches divergences like stash JSON spacing that a Java->Java round-trip misses.
+
+  private static String loadFixture(String name) {
+    try (InputStream in =
+        OssieConverterSuite.class.getClassLoader().getResourceAsStream("ossie_" + name)) {
+      if (in == null) {
+        throw new IllegalStateException("fixture not found: ossie_" + name);
+      }
+      return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+    } catch (java.io.IOException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  @Test
+  public void fixtureAExportMatchesFixture() {
+    String out = OssieConverter.convertOssieToMetricView(loadFixture("fixtureA_ossie.yaml"), null).yaml;
+    assertEquals(OssieConverter.parseYaml(loadFixture("fixtureA_metric_view.yaml")),
+        OssieConverter.parseYaml(out));
+  }
+
+  @Test
+  public void fixtureBImportMatchesFixture() {
+    // fixtureB exercises the custom_extensions stash (format/rely/filter) -- the parse
+    // includes the blob strings, so this is what pins the stash blob's exact spacing.
+    String out = OssieConverter.convertMetricViewToOssie(loadFixture("fixtureB_metric_view.yaml"), null).yaml;
+    assertEquals(OssieConverter.parseYaml(loadFixture("fixtureB_ossie.yaml")),
+        OssieConverter.parseYaml(out));
+  }
+
+  @Test
+  public void tpcdsExportMatchesFixture() {
+    String out = OssieConverter.convertOssieToMetricView(loadFixture("tpcds_ossie.yaml"), null).yaml;
+    assertEquals(OssieConverter.parseYaml(loadFixture("tpcds_metric_view.yaml")),
+        OssieConverter.parseYaml(out));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void stashBlobUsesExpectedSpacing() {
+    // The strongest byte-level check: the emitted stash blob string (the `data` value of a
+    // custom_extensions entry) must use the stash format's separators
+    // (", " / ": "). Pull the blob out of the parsed model rather than substring-matching
+    // the outer YAML (where it appears escaped).
+    Object out = OssieConverter.parseYaml(
+        OssieConverter.convertMetricViewToOssie(loadFixture("fixtureB_metric_view.yaml"), null).yaml);
+    Map<String, Object> model =
+        (Map<String, Object>) ((List<Object>) ((Map<String, Object>) out).get("semantic_model")).get(0);
+    List<Object> exts = (List<Object>) model.get("custom_extensions");
+    String blob = (String) ((Map<String, Object>) exts.get(0)).get("data");
+    assertTrue(blob.startsWith("{\"_v\": 1, "),
+        "stash blob must use the spacing '{\"_v\": 1, ...}', got: " + blob);
+  }
+
+  // -- parity edge cases found in review round 3 ----------------------------
+
+  @Test
+  public void pickExpressionFallsThroughEmptyDatabricksToAnsi() {
+    // An empty DATABRICKS dialect must fall through to ANSI_SQL,
+    // not be selected as the (empty) expression.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: f\n"
+        + "    source: c.s.f\n"
+        + "    fields:\n"
+        + "    - name: d\n"
+        + "      expression:\n"
+        + "        dialects:\n"
+        + "        - {dialect: DATABRICKS, expression: ''}\n"
+        + "        - {dialect: ANSI_SQL, expression: ansi_col}\n"
+        + "  metrics:\n"
+        + "  - {name: n, expression: {dialects: [{dialect: DATABRICKS, expression: COUNT(*)}]}}\n";
+    Object out = export(osi, null);
+    @SuppressWarnings("unchecked")
+    List<Object> dims = (List<Object>) ((Map<String, Object>) out).get("dimensions");
+    @SuppressWarnings("unchecked")
+    Map<String, Object> dim = (Map<String, Object>) dims.get(0);
+    assertEquals("ansi_col", dim.get("expr"));
+  }
+
+  @Test
+  public void pickExpressionRejectsNonStringExpression() {
+    // A non-string dialect expression (e.g. a YAML number) must raise, not be coerced.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: f\n"
+        + "    source: c.s.f\n"
+        + "    fields:\n"
+        + "    - name: d\n"
+        + "      expression:\n"
+        + "        dialects:\n"
+        + "        - {dialect: DATABRICKS, expression: 123}\n"
+        + "  metrics:\n"
+        + "  - {name: n, expression: {dialects: [{dialect: DATABRICKS, expression: COUNT(*)}]}}\n";
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertOssieToMetricView(osi, null));
+    assertTrue(e.getMessage().contains("expression must be a string"));
+  }
+
+  @Test
+  public void bareOnOffValuesStayStringsNotBooleans() {
+    // YAML 1.1 would read a bare `on`/`off`/`yes`/`no` value as a boolean, silently losing
+    // a join condition or turning a synonym into `true`. Confirm the converter's parser
+    // keeps them as strings (the reader uses YAML 1.2 boolean semantics).
+    Object parsed = OssieConverter.parseYaml("a: on\nb: off\nc: yes\nd: no\n");
+    @SuppressWarnings("unchecked")
+    Map<String, Object> m = (Map<String, Object>) parsed;
+    assertEquals("on", m.get("a"));
+    assertEquals("off", m.get("b"));
+    assertEquals("yes", m.get("c"));
+    assertEquals("no", m.get("d"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void importDropsEmptyOptionalFields() {
+    // Optional fields are mapped only when non-empty, so an empty
+    // comment / empty synonyms list are omitted, not emitted as `description: ""` or an
+    // empty ai_context. The Java port must match (empty string / empty list are falsy).
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "comment: ''\n"
+        + "dimensions:\n"
+        + "- {name: o_status, expr: o_orderstatus, comment: '', display_name: '', synonyms: []}\n"
+        + "measures:\n"
+        + "- {name: revenue, expr: SUM(o_totalprice), comment: '', synonyms: []}\n";
+    Map<String, Object> out = (Map<String, Object>) importMv(mv);
+    List<Object> models = (List<Object>) out.get("semantic_model");
+    Map<String, Object> model = (Map<String, Object>) models.get(0);
+    assertFalse(model.containsKey("description"), "empty comment must not become a description");
+    Map<String, Object> ds = (Map<String, Object>) ((List<Object>) model.get("datasets")).get(0);
+    Map<String, Object> field = (Map<String, Object>) ((List<Object>) ds.get("fields")).get(0);
+    assertFalse(field.containsKey("description"), "empty comment must not map to description");
+    assertFalse(field.containsKey("label"), "empty display_name must not map to label");
+    assertFalse(field.containsKey("ai_context"), "empty synonyms must not map to ai_context");
+    Map<String, Object> metric = (Map<String, Object>) ((List<Object>) model.get("metrics")).get(0);
+    assertFalse(metric.containsKey("description"), "empty comment must not map to description");
+    assertFalse(metric.containsKey("ai_context"), "empty synonyms must not map to ai_context");
+  }
+
+  @Test
+  public void stashEscapesNonAsciiAsLowercaseHex() {
+    // The stash blob is pure ASCII: non-ASCII is escaped to \\uXXXX. The
+    // stash blob must be byte-identical, so a non-ASCII stashed value (here a `filter`
+    // literal) escapes rather than emitting raw UTF-8.
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "filter: \"region = 'café'\"\n"
+        + "dimensions:\n"
+        + "- {name: o_status, expr: o_orderstatus}\n";
+    String ossieYaml = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
+    // Extract the stash blob and assert the exact expected bytes:
+    // the non-ASCII char is escaped as lowercase \\u00e9 (a single backslash + 5 chars),
+    // not emitted raw. (Comparing the parsed `data` string sidesteps YAML's own quoting.)
+    @SuppressWarnings("unchecked")
+    Map<String, Object> out = (Map<String, Object>) OssieConverter.parseYaml(ossieYaml);
+    @SuppressWarnings("unchecked")
+    List<Object> models = (List<Object>) out.get("semantic_model");
+    Map<String, Object> model = (Map<String, Object>) models.get(0);
+    @SuppressWarnings("unchecked")
+    List<Object> exts = (List<Object>) model.get("custom_extensions");
+    @SuppressWarnings("unchecked")
+    String blob = (String) ((Map<String, Object>) exts.get(0)).get("data");
+    assertEquals("{\"_v\": 1, \"filter\": \"region = 'caf\\u00e9'\"}", blob,
+        "stash blob must use a lowercase \\u escape");
+    // And it still round-trips back to the original view.
+    String back = OssieConverter.convertOssieToMetricView(ossieYaml, null).yaml;
+    assertEquals(OssieConverter.parseYaml(mv), OssieConverter.parseYaml(back));
+  }
+
+  @Test
+  public void stashPreservesAValueContainingALiteralUnicodeEscape() {
+    // A stashed value may itself contain the text of a unicode escape. Serialized, that is a
+    // DOUBLED backslash, so the hex-lowercasing pass must not treat it as a real escape --
+    // doing so silently lowercases the value's own characters.
+    // Single-quoted YAML: a backslash is an ordinary character there, so `filter` really holds
+    // the six characters \ u A B C D rather than the character U+ABCD.
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "filter: 'tag = \\uABCD'\n"
+        + "dimensions:\n"
+        + "- {name: o_status, expr: o_orderstatus}\n";
+    @SuppressWarnings("unchecked")
+    Map<String, Object> parsedIn = (Map<String, Object>) OssieConverter.parseYaml(mv);
+    String original = (String) parsedIn.get("filter");
+    // Guard the fixture itself: the value must contain a real backslash for this to be a test.
+    assertTrue(original.indexOf('\\') >= 0,
+        "test setup: filter must hold a literal backslash, got: " + original);
+
+    String ossieYaml = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
+    String back = OssieConverter.convertOssieToMetricView(ossieYaml, null).yaml;
+    @SuppressWarnings("unchecked")
+    Map<String, Object> restored = (Map<String, Object>) OssieConverter.parseYaml(back);
+    assertEquals(original, restored.get("filter"),
+        "a literal unicode-escape sequence in a stashed value must survive unchanged");
+  }
+
+  @Test
+  public void joinOnTakesPrecedenceOverUsing() {
+    // Metric View validation requires only that one of `on`/`using` is present, so both may be
+    // set. Databricks resolves the criteria from `on` when it is present, so the converter must
+    // decompose `on` and ignore `using` -- otherwise the relationship joins on other columns.
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "joins:\n"
+        + "- name: cust\n"
+        + "  source: c.s.customer\n"
+        + "  on: source.o_custkey = cust.c_custkey\n"
+        + "  using: [nation_key]\n"
+        + "dimensions:\n"
+        + "- {name: c_name, expr: cust.c_name}\n"
+        + "measures:\n"
+        + "- {name: cnt, expr: COUNT(1)}\n";
+    @SuppressWarnings("unchecked")
+    Map<String, Object> out = (Map<String, Object>) OssieConverter.parseYaml(
+        OssieConverter.convertMetricViewToOssie(mv, null).yaml);
+    @SuppressWarnings("unchecked")
+    List<Object> models = (List<Object>) out.get("semantic_model");
+    @SuppressWarnings("unchecked")
+    Map<String, Object> model = (Map<String, Object>) models.get(0);
+    @SuppressWarnings("unchecked")
+    List<Object> rels = (List<Object>) model.get("relationships");
+    @SuppressWarnings("unchecked")
+    Map<String, Object> rel = (Map<String, Object>) rels.get(0);
+    assertEquals(List.of("o_custkey"), rel.get("from_columns"),
+        "`on` must win over `using`: expected the o_custkey/c_custkey pair");
+    assertEquals(List.of("c_custkey"), rel.get("to_columns"),
+        "`on` must win over `using`: expected the o_custkey/c_custkey pair");
+  }
+
+  @Test
+  public void measureRewriteLeavesStringLiteralsAlone() {
+    // The fact qualifier is added/stripped by rewriting the measure expression. That rewrite must
+    // skip string literals: rewriting inside one changes the predicate and therefore the value.
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "dimensions:\n"
+        + "- {name: o_status, expr: o_orderstatus}\n"
+        + "measures:\n"
+        + "- name: tagged\n"
+        + "  expr: \"SUM(IF(source.region = 'source.us', 1, 0))\"\n";
+    String ossieYaml = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
+    assertTrue(ossieYaml.contains("'source.us'"),
+        "a literal mentioning the qualifier must not be rewritten, got:\n" + ossieYaml);
+    // The literal also survives the trip back. Note the *code* qualifier is normalized on the
+    // way through (`source.region` -> bare `region`, the Metric View idiom for fact columns);
+    // only the literal is required to come back byte-identical.
+    String back = OssieConverter.convertOssieToMetricView(ossieYaml, null).yaml;
+    assertTrue(back.contains("'source.us'"),
+        "the literal must survive the round trip, got:\n" + back);
+  }
+}
