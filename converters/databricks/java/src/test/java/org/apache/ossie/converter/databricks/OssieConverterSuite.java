@@ -771,4 +771,205 @@ public class OssieConverterSuite {
     assertTrue(back.contains("'source.us'"),
         "the literal must survive the round trip, got:\n" + back);
   }
+
+  /** A fact with `customer` joined to it and `region` nested under `customer`, plus one metric. */
+  private static String nestedJoinModel(String metricExpr) {
+    return "version: \"0.2.0.dev0\"\n"
+        + "semantic_model:\n"
+        + "  - name: sales\n"
+        + "    datasets:\n"
+        + "      - name: lineitem\n"
+        + "        source: cat.sch.lineitem\n"
+        + "        fields:\n"
+        + "          - name: l_key\n"
+        + "            expression:\n"
+        + "              dialects: [{dialect: DATABRICKS, expression: l_key}]\n"
+        + "      - name: customer\n"
+        + "        source: cat.sch.customer\n"
+        + "        primary_key: [c_key]\n"
+        + "      - name: region\n"
+        + "        source: cat.sch.region\n"
+        + "        primary_key: [r_key]\n"
+        + "    relationships:\n"
+        + "      - name: l_to_c\n"
+        + "        from: lineitem\n"
+        + "        to: customer\n"
+        + "        from_columns: [c_key]\n"
+        + "        to_columns: [c_key]\n"
+        + "      - name: c_to_r\n"
+        + "        from: customer\n"
+        + "        to: region\n"
+        + "        from_columns: [r_key]\n"
+        + "        to_columns: [r_key]\n"
+        + "    metrics:\n"
+        + "      - name: pop\n"
+        + "        expression:\n"
+        + "          dialects: [{dialect: DATABRICKS, expression: \"" + metricExpr + "\"}]\n";
+  }
+
+  @SuppressWarnings("unchecked")
+  private static String firstMeasureExpr(Object view) {
+    Map<String, Object> mv = (Map<String, Object>) view;
+    List<Object> measures = (List<Object>) mv.get("measures");
+    assertFalse(measures == null || measures.isEmpty(), "expected one measure, got: " + mv);
+    return (String) ((Map<String, Object>) measures.get(0)).get("expr");
+  }
+
+  @Test
+  public void exportQualifiesANestedMeasureWithTheFullJoinPath() {
+    // A Metric View addresses a nested join column by its full path, so a metric naming the
+    // dataset must come out as `customer.region.population`.
+    assertEquals("SUM(customer.region.population)",
+        firstMeasureExpr(export(nestedJoinModel("SUM(region.population)"), null)));
+  }
+
+  @Test
+  public void exportDoesNotQualifyAMeasurePathTwice() {
+    // The rewrite used to run one dataset name at a time, so it matched the `region.` inside the
+    // path it had just written and produced `SUM(customer.customer.region.population)` -- silently,
+    // with no notice. An expression that already carries the full path (what an import leaves
+    // behind) must come out unchanged.
+    assertEquals("SUM(customer.region.population)",
+        firstMeasureExpr(export(nestedJoinModel("SUM(customer.region.population)"), null)));
+  }
+
+  @Test
+  public void nestedQualifiedMeasureRoundTripsBothWays() {
+    String mv =
+        "version: '1.1'\n"
+        + "source: cat.sch.lineitem\n"
+        + "joins:\n"
+        + "- name: customer\n"
+        + "  source: cat.sch.customer\n"
+        + "  using: [c_key]\n"
+        + "  joins:\n"
+        + "  - name: region\n"
+        + "    source: cat.sch.region\n"
+        + "    using: [r_key]\n"
+        + "dimensions:\n"
+        + "- {name: l_key, expr: l_key}\n"
+        + "measures:\n"
+        + "- {name: pop, expr: SUM(customer.region.population)}\n";
+    String ossieYaml = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
+    // The import de-aliases the path down to the dataset that owns the column...
+    assertTrue(ossieYaml.contains("SUM(region.population)"),
+        "import should de-alias the join path to the dataset name, got:\n" + ossieYaml);
+    // ...and the export puts it back, so the measure survives MV -> Ossie -> MV.
+    assertEquals("SUM(customer.region.population)",
+        firstMeasureExpr(OssieConverter.parseYaml(
+            OssieConverter.convertOssieToMetricView(ossieYaml, null).yaml)));
+  }
+
+  @Test
+  public void cascadeDropIgnoresADroppedNameInsideAStringLiteral() {
+    // A field dropped for lacking a usable dialect must not take an unrelated measure with it just
+    // because its name appears in a string literal: `'us'` is not a reference to a column `us`.
+    String osi =
+        "version: \"0.2.0.dev0\"\n"
+        + "semantic_model:\n"
+        + "  - name: sales\n"
+        + "    datasets:\n"
+        + "      - name: orders\n"
+        + "        source: cat.sch.orders\n"
+        + "        fields:\n"
+        + "          - name: amount\n"
+        + "            expression:\n"
+        + "              dialects: [{dialect: DATABRICKS, expression: amount}]\n"
+        + "          - name: us\n"
+        + "            expression:\n"
+        + "              dialects: [{dialect: SNOWFLAKE, expression: us_col}]\n"
+        + "    metrics:\n"
+        + "      - name: amt_us\n"
+        + "        expression:\n"
+        + "          dialects:\n"
+        + "            - dialect: DATABRICKS\n"
+        + "              expression: \"SUM(IF(region = 'us', amount, 0))\"\n";
+    OssieConverter.Result result = OssieConverter.convertOssieToMetricView(osi, null);
+    assertEquals("SUM(IF(region = 'us', amount, 0))",
+        firstMeasureExpr(OssieConverter.parseYaml(result.yaml)));
+    for (String notice : result.notices) {
+      assertFalse(notice.contains("amt_us") && notice.contains("references dropped"),
+          "the measure only mentions 'us' in a literal, got notice: " + notice);
+    }
+  }
+
+  @Test
+  public void stashPreservesABackslashBeforeAUnicodeEscape() {
+    // The stash lowercases the hex of Jackson's \\uXXXX escapes. That rewrite must re-emit any
+    // escaped-backslash run in front of the escape verbatim; it used to halve it, so a value
+    // holding a literal backslash came back as the six characters "u00e9".
+    String value = "tag = \\" + "é";
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "filter: '" + value + "'\n"
+        + "dimensions:\n"
+        + "- {name: o_status, expr: o_orderstatus}\n";
+    String ossieYaml = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
+    @SuppressWarnings("unchecked")
+    Map<String, Object> back = (Map<String, Object>) OssieConverter.parseYaml(
+        OssieConverter.convertOssieToMetricView(ossieYaml, null).yaml);
+    assertEquals(value, back.get("filter"),
+        "the stashed filter must survive MV -> Ossie -> MV byte-for-byte");
+  }
+
+  @Test
+  public void exportWarnsWhenAColumnAiContextObjectIsDropped() {
+    // `ai_context` is `string | object`; only the object's `synonyms` has a Metric View slot, so
+    // the other members are dropped -- and the README promises a notice when that happens. The
+    // same goes for foreign-vendor extensions on a metric.
+    String osi =
+        "version: \"0.2.0.dev0\"\n"
+        + "semantic_model:\n"
+        + "  - name: sales\n"
+        + "    datasets:\n"
+        + "      - name: orders\n"
+        + "        source: cat.sch.orders\n"
+        + "        fields:\n"
+        + "          - name: amount\n"
+        + "            expression:\n"
+        + "              dialects: [{dialect: DATABRICKS, expression: amount}]\n"
+        + "            ai_context:\n"
+        + "              instructions: do not use this column\n"
+        + "              synonyms: [amt]\n"
+        + "    metrics:\n"
+        + "      - name: total\n"
+        + "        expression:\n"
+        + "          dialects: [{dialect: DATABRICKS, expression: SUM(amount)}]\n"
+        + "        ai_context:\n"
+        + "          examples: [how much did we sell]\n"
+        + "        custom_extensions:\n"
+        + "          - vendor_name: SNOWFLAKE\n"
+        + "            data: \"{}\"\n";
+    List<String> notices = OssieConverter.convertOssieToMetricView(osi, null).notices;
+    assertTrue(notices.contains(
+        "[field 'amount'] ai_context [instructions] dropped "
+            + "(only 'synonyms' has a Metric View counterpart)"),
+        "expected a notice for the field's dropped ai_context members, got: " + notices);
+    assertTrue(notices.contains(
+        "[metric 'total'] ai_context [examples] dropped "
+            + "(only 'synonyms' has a Metric View counterpart)"),
+        "expected a notice for the metric's dropped ai_context members, got: " + notices);
+    assertTrue(notices.contains("[metric 'total'] foreign-vendor custom_extensions dropped"),
+        "expected a notice for the metric's foreign-vendor extensions, got: " + notices);
+  }
+
+  @Test
+  public void importValidatesAJoinSourceTheWayTheExportDoes() {
+    // A 2-part join source used to import cleanly and then fail on the way back out, so a view
+    // that imported could not be exported. Reject it at the same point either direction would.
+    String mv =
+        "version: '1.1'\n"
+        + "source: cat.sch.orders\n"
+        + "joins:\n"
+        + "- name: d\n"
+        + "  source: sch.d\n"
+        + "  using: [k]\n"
+        + "dimensions:\n"
+        + "- {name: o_status, expr: o_orderstatus}\n";
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertMetricViewToOssie(mv, null));
+    assertTrue(e.getMessage().contains("3-part"),
+        "expected the same source-shape error the export raises, got: " + e.getMessage());
+  }
 }

@@ -27,14 +27,17 @@ import static org.apache.ossie.converter.databricks.OssieConverterCommon.STASH_S
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.SYNONYM_LIMIT;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.asList;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.asMap;
+import static org.apache.ossie.converter.databricks.OssieConverterCommon.findOutsideLiterals;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.foreignVendorExtensions;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.get;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.isSimpleIdentifier;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.loadYaml;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.mergeDescription;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.pickExpression;
+import static org.apache.ossie.converter.databricks.OssieConverterCommon.qualifierChainPattern;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.readStash;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.replaceOutsideLiterals;
+import static org.apache.ossie.converter.databricks.OssieConverterCommon.rewriteQualifiers;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.require;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.requireStr;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.str;
@@ -166,7 +169,7 @@ final class OssieToMetricView {
 
     List<Object> joins = new ArrayList<>();
     for (Node child : root.children) {
-      joins.add(buildJoin(child, "source", datasets, notices));
+      joins.add(buildJoin(child, "source", datasets));
     }
     if (!joins.isEmpty()) {
       view.put("joins", joins);
@@ -221,9 +224,11 @@ final class OssieToMetricView {
     List<Map<String, Object>> measures = new ArrayList<>();
     // Depends only on the fact name, so compile it once rather than per metric.
     Pattern factQualifier = Pattern.compile("\\b" + Pattern.quote(fact) + "\\.");
+    // Likewise fixed once the join tree is walked: one alternation over the joined dataset names.
+    Pattern datasetHead = qualifierChainPattern(datasetAliasPath.keySet());
     for (Object mObj : asList(get(model, "metrics"))) {
-      Map<String, Object> measure =
-          convertMetric(asMap(mObj), factQualifier, datasetAliasPath, seenDims, notices);
+      Map<String, Object> measure = convertMetric(
+          asMap(mObj), factQualifier, datasetHead, datasetAliasPath, seenDims, notices);
       if (measure == null) {
         droppedMeasures.add(str(get(asMap(mObj), "name")));
         continue;
@@ -549,27 +554,20 @@ final class OssieToMetricView {
   }
 
   /**
-   * Rewrites `<dataset>.` heads in a measure expression to the alias path that addresses that
-   * dataset's columns from the primary source (`parentJoin.nestedJoin.`).
+   * Rewrites the `<dataset>.` qualifier of a measure expression to the alias path that addresses
+   * that dataset's columns from the primary source (`parentJoin.nestedJoin.`).
    *
    * <p>A dataset joined directly to the primary already maps to its own alias, so those rewrites
-   * are no-ops; only a nested dataset actually changes. Datasets are processed longest-name-first
-   * so a shorter name is never rewritten inside a longer one (`nation` must not match
-   * `nation_x.`), and the rewrite skips string literals and comments, as the fact strip does.
+   * are no-ops; only a nested dataset actually changes. The whole qualifier run is matched at once
+   * and resolved from its leaf (see {@link OssieConverterCommon#qualifierChainPattern}), so an
+   * expression that already carries a full path -- {@code SUM(customer.region.population)}, which
+   * is what an import leaves behind -- is recognized as addressing `region` and re-emitted
+   * unchanged rather than qualified a second time. String literals and comments are skipped, as
+   * the fact strip does.
    */
-  private static String qualifyMeasure(String expr, Map<String, String> datasetAliasPath) {
-    List<String> datasets = new ArrayList<>(datasetAliasPath.keySet());
-    datasets.sort((a, b) -> b.length() - a.length());
-    String out = expr;
-    for (String dataset : datasets) {
-      String aliasPath = datasetAliasPath.get(dataset);
-      if (aliasPath == null || aliasPath.isEmpty() || aliasPath.equals(dataset)) {
-        continue;
-      }
-      out = replaceOutsideLiterals(
-          out, Pattern.compile("\\b" + Pattern.quote(dataset) + "\\."), aliasPath + ".");
-    }
-    return out;
+  private static String qualifyMeasure(
+      String expr, Pattern datasetHead, Map<String, String> datasetAliasPath) {
+    return rewriteQualifiers(expr, datasetHead, datasetAliasPath::get);
   }
 
   /** Sorted so the error message is deterministic (the dropped-name sets are unordered). */
@@ -600,7 +598,7 @@ final class OssieToMetricView {
   }
 
   private static Map<String, Object> buildJoin(Node node, String parentAlias,
-      Map<String, Map<String, Object>> datasets, Notices notices) {
+      Map<String, Map<String, Object>> datasets) {
     Map<String, Object> rel = node.rel;
     String alias = node.alias;
     Map<String, Object> join = new LinkedHashMap<>();
@@ -636,7 +634,7 @@ final class OssieToMetricView {
     }
     List<Object> nested = new ArrayList<>();
     for (Node c : node.children) {
-      nested.add(buildJoin(c, alias, datasets, notices));
+      nested.add(buildJoin(c, alias, datasets));
     }
     if (!nested.isEmpty()) {
       join.put("joins", nested);
@@ -752,6 +750,7 @@ final class OssieToMetricView {
   private static Map<String, Object> convertMetric(
       Map<String, Object> metric,
       Pattern factQualifier,
+      Pattern datasetHead,
       Map<String, String> datasetAliasPath,
       Set<String> seenNames,
       Notices notices) {
@@ -772,7 +771,7 @@ final class OssieToMetricView {
     // a parameter rather than as a join column -- it fails silently. Dimensions already qualify
     // this way via the joinPath handed to convertField, so this keeps the two directions
     // consistent on the same input.
-    expr = qualifyMeasure(expr, datasetAliasPath);
+    expr = qualifyMeasure(expr, datasetHead, datasetAliasPath);
     // Strip a `<fact>.` qualifier so fact columns are bare in measures (the Metric View idiom).
     // Only outside string literals / comments: a literal such as 'customer.us' must not be
     // rewritten, or the measure's predicate changes.
@@ -798,20 +797,37 @@ final class OssieToMetricView {
     if (stash.containsKey("partition")) {
       measure.put("partition", stash.get("partition"));
     }
+    warnDroppedColumn(metric, scope, notices);
     return measure;
   }
 
-  private static String referencesDropped(
-      String expr, String selfName, Set<String> droppedDims, Set<String> droppedMeasures) {
+  /**
+   * The name of a dropped measure/dimension this expression references, or null.
+   *
+   * <p>Matched against SQL code only: a dropped name that merely occurs inside a string literal --
+   * {@code SUM(IF(region = 'us', amount, 0))} where a field named `us` was dropped -- is not a
+   * reference, and dropping the column for it would silently change the view. The rewrite paths
+   * skip literals for the same reason.
+   */
+  private static String referencesDropped(String expr, String selfName, Set<String> droppedDims,
+      Set<String> droppedMeasures, Map<String, Pattern> refPatterns) {
     for (String m : droppedMeasures) {
-      if (m != null && Pattern.compile("measure\\(\\s*" + Pattern.quote(m) + "\\s*\\)")
-          .matcher(expr).find()) {
+      if (m == null) {
+        continue;
+      }
+      Pattern p = refPatterns.computeIfAbsent("measure:" + m,
+          k -> Pattern.compile("measure\\(\\s*" + Pattern.quote(m) + "\\s*\\)"));
+      if (findOutsideLiterals(expr, p)) {
         return m;
       }
     }
     for (String d : droppedDims) {
-      if (d != null && !d.equals(selfName)
-          && Pattern.compile("(?<![\\w.])" + Pattern.quote(d) + "(?![\\w.])").matcher(expr).find()) {
+      if (d == null || d.equals(selfName)) {
+        continue;
+      }
+      Pattern p = refPatterns.computeIfAbsent("dimension:" + d,
+          k -> Pattern.compile("(?<![\\w.])" + Pattern.quote(d) + "(?![\\w.])"));
+      if (findOutsideLiterals(expr, p)) {
         return d;
       }
     }
@@ -821,21 +837,28 @@ final class OssieToMetricView {
   private static void cascadeDrop(List<Map<String, Object>> dimensions,
       List<Map<String, Object>> measures, Set<String> droppedDims,
       Set<String> droppedMeasures, Notices notices) {
+    // A name's pattern never changes and the dropped sets only grow, so compile each one once and
+    // reuse it across every pass and column rather than per (pass x column x dropped name).
+    Map<String, Pattern> refPatterns = new HashMap<>();
     boolean changed = true;
     while (changed) {
       changed = false;
-      changed |= cascadePass(dimensions, "dimension", droppedDims, droppedDims, droppedMeasures, notices);
-      changed |= cascadePass(measures, "measure", droppedMeasures, droppedDims, droppedMeasures, notices);
+      changed |= cascadePass(
+          dimensions, "dimension", droppedDims, droppedDims, droppedMeasures, refPatterns, notices);
+      changed |= cascadePass(
+          measures, "measure", droppedMeasures, droppedDims, droppedMeasures, refPatterns, notices);
     }
   }
 
   private static boolean cascadePass(List<Map<String, Object>> coll, String kind,
-      Set<String> droppedSet, Set<String> droppedDims, Set<String> droppedMeasures, Notices notices) {
+      Set<String> droppedSet, Set<String> droppedDims, Set<String> droppedMeasures,
+      Map<String, Pattern> refPatterns, Notices notices) {
     boolean changed = false;
     List<Map<String, Object>> survivors = new ArrayList<>();
     for (Map<String, Object> col : coll) {
       String nm = (String) col.get("name");
-      String ref = referencesDropped((String) col.get("expr"), nm, droppedDims, droppedMeasures);
+      String ref = referencesDropped(
+          (String) col.get("expr"), nm, droppedDims, droppedMeasures, refPatterns);
       if (ref != null) {
         notices.warn(kind + " '" + nm + "'",
             "references dropped '" + ref + "'; dropping (downstream of a dropped field/metric)");
@@ -896,7 +919,35 @@ final class OssieToMetricView {
     if (dim instanceof Map && asMap(dim).containsKey("is_time")) {
       notices.warn(scope, "dimension.is_time has no Metric View counterpart; dropped");
     }
-    if (!foreignVendorExtensions(field).isEmpty()) {
+    warnDroppedColumn(field, scope, notices);
+  }
+
+  /**
+   * Notices shared by a field and a metric: the members of an `ai_context` OBJECT that have no
+   * Metric View slot, and foreign-vendor extensions.
+   *
+   * <p>`ai_context` is `string | object` in the Apache Ossie schema. The string form maps to the
+   * column comment (mergeDescription) and the object's `synonyms` maps to the column's synonyms,
+   * but every other object member -- `instructions`, `examples` -- has nowhere to go. Naming them
+   * keeps the "dropped with a notice" contract that the dataset- and model-level checks in
+   * warnDroppedModel already honour.
+   */
+  private static void warnDroppedColumn(Map<String, Object> column, String scope, Notices notices) {
+    Object aiContext = get(column, "ai_context");
+    if (aiContext instanceof Map) {
+      List<String> dropped = new ArrayList<>();
+      for (String key : asMap(aiContext).keySet()) {
+        if (!"synonyms".equals(key)) {
+          dropped.add(key);
+        }
+      }
+      if (!dropped.isEmpty()) {
+        java.util.Collections.sort(dropped);
+        notices.warn(scope, "ai_context " + dropped
+            + " dropped (only 'synonyms' has a Metric View counterpart)");
+      }
+    }
+    if (!foreignVendorExtensions(column).isEmpty()) {
       notices.warn(scope, "foreign-vendor custom_extensions dropped");
     }
   }

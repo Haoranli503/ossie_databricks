@@ -41,7 +41,7 @@
     <properties>
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <snakeyaml.version>2.2</snakeyaml.version>
+        <snakeyaml.version>2.3</snakeyaml.version>
         <jackson.version>2.18.9</jackson.version>
         <junit.version>5.10.2</junit.version>
     </properties>
@@ -90,11 +90,31 @@
                 </configuration>
             </plugin>
 
+            <!-- The test classes are named *Suite, which none of Surefire's default includes
+                 (Test*/*Test/*Tests/*TestCase) match: without this the build runs zero tests and
+                 still reports success. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <includes>
+                        <include>**/*Suite.java</include>
+                        <include>**/*Test.java</include>
+                        <include>**/*Tests.java</include>
+                    </includes>
+                </configuration>
+            </plugin>
+
             <!-- Bundle dependencies into a self-contained executable jar. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
                 <version>3.5.1</version>
+                <configuration>
+                    <!-- Keep the module root clean: the reduced pom is an untracked build artifact
+                         that the license audit below would flag. -->
+                    <createDependencyReducedPom>false</createDependencyReducedPom>
+                </configuration>
                 <executions>
                     <execution>
                         <phase>package</phase>
@@ -121,8 +141,6 @@
                     <consoleOutput>true</consoleOutput>
                     <excludes>
                         <exclude>**/target/**</exclude>
-                        <!-- Markdown docs (README) carry no license header -->
-                        <exclude>**/*.md</exclude>
                     </excludes>
                 </configuration>
             </plugin>

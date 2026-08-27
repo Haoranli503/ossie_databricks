@@ -23,6 +23,7 @@ import static org.apache.ossie.converter.databricks.OssieConverterCommon.DIALECT
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.MAPPER;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.MV_VERSION;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.OSSIE_VERSION;
+import static org.apache.ossie.converter.databricks.OssieConverterCommon.SELECT_WITH_RE;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.STASH_SOURCE_KEY;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.asList;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.asMap;
@@ -30,8 +31,9 @@ import static org.apache.ossie.converter.databricks.OssieConverterCommon.get;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.isSimpleIdentifier;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.loadYaml;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.lastIdentifier;
-import static org.apache.ossie.converter.databricks.OssieConverterCommon.replaceOutsideLiterals;
+import static org.apache.ossie.converter.databricks.OssieConverterCommon.qualifierChainPattern;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.requireStr;
+import static org.apache.ossie.converter.databricks.OssieConverterCommon.rewriteQualifiers;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.str;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.strList;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.truthy;
@@ -73,7 +75,6 @@ final class MetricViewToOssie {
   private static final Pattern NON_EQUI_RE = Pattern.compile("[<>!]=|<>|[<>]");
   private static final Pattern AND_SPLIT_RE = Pattern.compile("\\s+AND\\s+", Pattern.CASE_INSENSITIVE);
   private static final Pattern EQ_CLAUSE_RE = Pattern.compile("^\\s*(.+?)\\s*=\\s*(.+?)\\s*$");
-  private static final Pattern SOURCE_QUALIFIER_RE = Pattern.compile("\\bsource\\.");
 
   private MetricViewToOssie() {}
 
@@ -112,9 +113,8 @@ final class MetricViewToOssie {
     if (source == null || source.toString().isEmpty()) {
       throw new ConversionException("Metric View is missing required 'source'");
     }
-    String s = source.toString().trim();
-    String firstToken = s.split("\\s+", 2)[0].toUpperCase(Locale.ROOT);
-    boolean isSql = firstToken.equals("SELECT") || firstToken.equals("WITH");
+    // Same subquery test validateSource applies below, so the two cannot drift.
+    boolean isSql = SELECT_WITH_RE.matcher(source.toString().trim()).find();
     String lastId = lastIdentifier(source);
     String factName;
     if (modelName != null) {
@@ -173,6 +173,8 @@ final class MetricViewToOssie {
     }
 
     List<Object> metrics = new ArrayList<>();
+    // Fixed once the join tree is walked, so compile it once for all measures.
+    Pattern aliasHead = qualifierChainPattern(aliasToDataset.keySet());
     for (Object mObj : asList(get(view, "measures"))) {
       Map<String, Object> m = asMap(mObj);
       if (isWildcard(m)) {
@@ -180,7 +182,7 @@ final class MetricViewToOssie {
             + "' has no Apache Ossie metric representation; skipped");
         continue;
       }
-      metrics.add(convertMeasure(m, factName));
+      metrics.add(convertMeasure(m, aliasHead, aliasToDataset));
     }
 
     Map<String, Object> model = new LinkedHashMap<>();
@@ -225,7 +227,12 @@ final class MetricViewToOssie {
       }
       Map<String, Object> childDs = new LinkedHashMap<>();
       childDs.put("name", child);
-      childDs.put("source", requireStr(join, "source", "join '" + child + "'"));
+      // Validated with the same rule the export applies to a dataset source, so a Metric View that
+      // imports cleanly is always exportable again (a 2-part join source used to import fine and
+      // then fail on the way back out).
+      String childSource = requireStr(join, "source", "join '" + child + "'");
+      validateSource(childSource, child);
+      childDs.put("source", childSource);
       datasets.add(childDs);
       aliasToDataset.put(child, child);
       Map<String, Object> rel = convertJoin(join, parentName, parentAlias, child);
@@ -432,10 +439,19 @@ final class MetricViewToOssie {
     return isSimpleIdentifier(restStr) ? new String[] {ds, restStr} : new String[] {ds, expr};
   }
 
-  private static Map<String, Object> convertMeasure(Map<String, Object> measure, String factName) {
+  /**
+   * Converts a measure to an Apache Ossie metric, de-aliasing the expression's column qualifiers:
+   * a Metric View addresses a joined column by its full join path, an Apache Ossie metric by the
+   * dataset name, so {@code parent.child.col} becomes {@code child.col} and {@code source.col}
+   * becomes {@code <fact>.col}. This is the inverse of {@code OssieToMetricView.qualifyMeasure},
+   * and it is what {@code resolveColumn} already does for a dimension -- measures used to keep the
+   * raw path, so a nested one survived only by accident.
+   */
+  private static Map<String, Object> convertMeasure(
+      Map<String, Object> measure, Pattern aliasHead, Map<String, String> aliasToDataset) {
     String name = requireStr(measure, "name", "measure");
     String rawExpr = requireStr(measure, "expr", "measure '" + name + "'");
-    String expr = replaceOutsideLiterals(rawExpr, SOURCE_QUALIFIER_RE, factName + ".");
+    String expr = rewriteQualifiers(rawExpr, aliasHead, aliasToDataset::get);
     Map<String, Object> metric = new LinkedHashMap<>();
     metric.put("name", name);
     metric.put("expression", dialectExpr(expr));

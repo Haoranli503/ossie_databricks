@@ -18,10 +18,13 @@
 package org.apache.ossie.converter.databricks;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -70,6 +73,9 @@ final class OssieConverterCommon {
   // checked-in fixtures: a space after ':' and ', ' between entries, as in
   // {"_v": 1, "filter": "x"}.
   static final com.fasterxml.jackson.databind.ObjectWriter JSON_WRITER = buildJsonWriter();
+  // Reader for the same blob. It is JSON, so parse it as JSON: the YAML mapper would also accept
+  // input JSON_WRITER never emits, silently widening the stash format.
+  private static final ObjectMapper JSON_READER = new ObjectMapper();
 
   /** A MinimalPrettyPrinter (no newlines) using the stash blob's separators: ": " / ", ". */
   private static final class JsonDumpsPrinter
@@ -209,9 +215,61 @@ final class OssieConverterCommon {
    * <p>{@code replacement} is treated as a literal string, not as a regex replacement template.
    */
   static String replaceOutsideLiterals(String sql, Pattern pattern, String replacement) {
+    return replaceOutsideLiterals(sql, pattern, m -> replacement);
+  }
+
+  /**
+   * As {@link #replaceOutsideLiterals(String, Pattern, String)}, but each match is replaced with
+   * {@code replacer.apply(match)} -- for a rewrite whose result depends on what matched. The
+   * returned text is inserted literally, not as a regex replacement template.
+   */
+  static String replaceOutsideLiterals(
+      String sql, Pattern pattern, Function<MatchResult, String> replacer) {
     StringBuilder out = new StringBuilder(sql.length());
-    int i = 0;
     int codeStart = 0;
+    for (int[] span : literalSpans(sql)) {
+      // Rewrite the code span that precedes this literal/comment, then copy the span verbatim.
+      out.append(rewriteLiterally(sql.substring(codeStart, span[0]), pattern, replacer));
+      out.append(sql, span[0], span[1]);
+      codeStart = span[1];
+    }
+    out.append(rewriteLiterally(sql.substring(codeStart), pattern, replacer));
+    return out.toString();
+  }
+
+  /**
+   * True when {@code pattern} matches the SQL code of {@code sql} -- the find-only counterpart of
+   * {@link #replaceOutsideLiterals}, with the same string-literal/comment blindness.
+   *
+   * <p>Needed wherever a decision is made from an expression's text: a bare
+   * {@code pattern.matcher(sql).find()} also sees inside literals, so a column name that only
+   * occurs in a string (as in {@code SUM(IF(region = 'us', amt, 0))}) reads as a reference to a
+   * column named {@code us}.
+   */
+  static boolean findOutsideLiterals(String sql, Pattern pattern) {
+    List<int[]> spans = literalSpans(sql);
+    if (spans.isEmpty()) {
+      return pattern.matcher(sql).find();
+    }
+    // Blank the literal/comment spans rather than removing them, so the surrounding code keeps its
+    // token boundaries (the pattern may rely on \b or a look-around).
+    StringBuilder code = new StringBuilder(sql);
+    for (int[] span : spans) {
+      for (int i = span[0]; i < span[1]; i++) {
+        code.setCharAt(i, ' ');
+      }
+    }
+    return pattern.matcher(code).find();
+  }
+
+  /**
+   * Start (inclusive) and end (exclusive) offsets of every span in {@code sql} that is not SQL
+   * code: string literals ({@code '...'}, {@code "..."}), backquoted identifiers, {@code -- line}
+   * comments, and {@code /* block *}{@code /} comments.
+   */
+  private static List<int[]> literalSpans(String sql) {
+    List<int[]> spans = new ArrayList<>();
+    int i = 0;
     while (i < sql.length()) {
       char c = sql.charAt(i);
       int skipTo = -1;
@@ -228,14 +286,10 @@ final class OssieConverterCommon {
         i++;
         continue;
       }
-      // Rewrite the code span that precedes this literal/comment, then copy the span verbatim.
-      out.append(rewriteLiterally(sql.substring(codeStart, i), pattern, replacement));
-      out.append(sql, i, skipTo);
+      spans.add(new int[] {i, skipTo});
       i = skipTo;
-      codeStart = skipTo;
     }
-    out.append(rewriteLiterally(sql.substring(codeStart), pattern, replacement));
-    return out.toString();
+    return spans;
   }
 
   /** Index just past the quoted span starting at {@code start}; handles doubled-quote escapes. */
@@ -261,8 +315,58 @@ final class OssieConverterCommon {
     return sql.length();
   }
 
-  private static String rewriteLiterally(String code, Pattern pattern, String replacement) {
-    return pattern.matcher(code).replaceAll(Matcher.quoteReplacement(replacement));
+  private static String rewriteLiterally(
+      String code, Pattern pattern, Function<MatchResult, String> replacer) {
+    return pattern.matcher(code)
+        .replaceAll(m -> Matcher.quoteReplacement(replacer.apply(m)));
+  }
+
+  /**
+   * A pattern matching a maximal dotted run of {@code names} that qualifies a column reference --
+   * {@code parent.child.} -- with group 1 holding the run without its trailing dot. Null when
+   * {@code names} is empty.
+   *
+   * <p>The whole run is matched at once, rather than one name at a time, so a rewrite driven by
+   * this pattern can never re-match a qualifier it has just produced: rewriting
+   * {@code customer.region.} name-by-name would see the {@code region.} inside its own output and
+   * qualify it a second time. The required trailing dot keeps a column that merely shares a name
+   * with a dataset ({@code SUM(customer.region)}) from being read as a qualifier.
+   */
+  static Pattern qualifierChainPattern(Collection<String> names) {
+    if (names.isEmpty()) {
+      return null;
+    }
+    // Longest name first: regex alternation is ordered, so at a given position the longest name
+    // wins (`nation_x` must never match as `nation`).
+    List<String> sorted = new ArrayList<>(names);
+    sorted.sort((a, b) -> b.length() - a.length());
+    StringBuilder alternation = new StringBuilder();
+    for (String name : sorted) {
+      if (alternation.length() > 0) {
+        alternation.append('|');
+      }
+      alternation.append(Pattern.quote(name));
+    }
+    String one = "(?:" + alternation + ")";
+    return Pattern.compile("\\b(" + one + "(?:\\." + one + ")*)\\.");
+  }
+
+  /**
+   * Rewrites each qualifier run {@code chain} matches by mapping the run's LAST name through
+   * {@code resolve} -- the name closest to the column is the one being addressed, as
+   * {@code resolveColumn} treats a dimension's alias path. A run whose leaf {@code resolve} does
+   * not know is left alone. Literals and comments are skipped, and the pass is single, so the
+   * result is independent of the order the names happen to be in.
+   */
+  static String rewriteQualifiers(String expr, Pattern chain, Function<String, String> resolve) {
+    if (chain == null) {
+      return expr;
+    }
+    return replaceOutsideLiterals(expr, chain, m -> {
+      String leaf = lastIdentifier(m.group(1));
+      String resolved = leaf == null ? null : resolve.apply(leaf);
+      return resolved == null ? m.group() : resolved + ".";
+    });
   }
 
   // Presence is tested by key, so a legitimately falsy non-string value (0, false) is returned;
@@ -400,7 +504,7 @@ final class OssieConverterCommon {
         }
         Map<String, Object> parsed;
         try {
-          parsed = asMap(MAPPER.readValue(data, Object.class));
+          parsed = asMap(JSON_READER.readValue(data, Object.class));
         } catch (Exception e) {
           throw new ConversionException(
               "DATABRICKS custom_extensions data is not valid JSON: " + e.getMessage(), e);
@@ -439,9 +543,12 @@ final class OssieConverterCommon {
     }
     // Jackson emits unicode escapes with uppercase hex; the stash format uses lowercase. Lowercase
     // just the 4 hex digits of each real escape, preserving any escaped-backslash run in front of
-    // it (see UNICODE_ESCAPE_RE).
+    // it (see UNICODE_ESCAPE_RE). quoteReplacement is required: replaceAll still reads backslashes
+    // in the returned string as replacement-template escapes, which would halve the run in
+    // group(1) rather than re-emitting it verbatim.
     blob = UNICODE_ESCAPE_RE.matcher(blob)
-        .replaceAll(m -> m.group(1) + "\\\\u" + m.group(2).toLowerCase(Locale.ROOT));
+        .replaceAll(m -> Matcher.quoteReplacement(
+            m.group(1) + "\\u" + m.group(2).toLowerCase(Locale.ROOT)));
     List<Object> exts = (List<Object>) obj.computeIfAbsent("custom_extensions", k -> new ArrayList<>());
     for (Object extObj : exts) {
       Map<String, Object> ext = asMap(extObj);

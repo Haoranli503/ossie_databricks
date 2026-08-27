@@ -28,14 +28,16 @@ import java.util.List;
  * Command-line entry point for the converter between Apache Ossie and Databricks Metric Views.
  *
  * <pre>{@code
- *   ossie-databricks import <model.yaml> [-o <view.yaml>] [--source <dataset>]
- *   ossie-databricks export <view.yaml>  [-o <model.yaml>] [--name <model>]
+ *   ossie-databricks export <model.yaml> [-o <view.yaml>] [--source <dataset>]
+ *   ossie-databricks import <view.yaml>  [-o <model.yaml>] [--name <model>]
  * }</pre>
  *
- * <p>{@code import} converts an Apache Ossie semantic model to a Metric View; {@code export}
- * converts a Metric View to an Apache Ossie model. Output goes to the {@code -o} file, or to stdout
- * when omitted. Conversion notices (features dropped on import) are written to stderr. A broken
- * input raises {@link OssieConverter.ConversionException}, reported as a non-zero exit.
+ * <p>The directions are named from the Apache Ossie model's point of view, matching
+ * {@link OssieConverter} and the Python converter: {@code export} converts an Apache Ossie semantic
+ * model to a Metric View; {@code import} converts a Metric View to an Apache Ossie model. Output
+ * goes to the {@code -o} file, or to stdout when omitted. Conversion notices (features dropped on
+ * export) are written to stderr. A broken input raises
+ * {@link OssieConverter.ConversionException}, reported as a non-zero exit.
  *
  * <p>This is a thin command-line wrapper around {@link OssieConverter}: it parses arguments, reads
  * the input YAML, invokes the library, and writes the result. Programmatic callers should use
@@ -62,23 +64,24 @@ public final class OssieDatabricksConverter {
     if (args.length == 0) {
       throw new ExitException(2, usage());
     }
-    String command = args[0];
-    Args parsed = Args.parse(args);
+    String first = args[0];
+    if ("-h".equals(first) || "--help".equals(first) || "help".equals(first)) {
+      out.println(usage());
+      return;
+    }
+    // Resolve the command before parsing the rest, so an unknown command reports itself rather
+    // than whatever the argument parser trips over first.
+    Command command = Command.parse(first);
+    Args parsed = Args.parse(args, command);
 
     String input = read(parsed.inputPath);
-    OssieConverter.Result result;
-    switch (command) {
-      case "import":
-        // Apache Ossie -> Metric View. `--source` picks the fact/grain (optional).
-        result = OssieConverter.convertOssieToMetricView(input, parsed.option);
-        break;
-      case "export":
-        // Metric View -> Apache Ossie. `--name` sets the model name (optional).
-        result = OssieConverter.convertMetricViewToOssie(input, parsed.option);
-        break;
-      default:
-        throw new ExitException(2, "Unknown command '" + command + "'.\n" + usage());
-    }
+    OssieConverter.Result result =
+        switch (command) {
+          // `--source` picks the fact/grain (optional).
+          case EXPORT -> OssieConverter.convertOssieToMetricView(input, parsed.option);
+          // `--name` sets the model name (optional).
+          case IMPORT -> OssieConverter.convertMetricViewToOssie(input, parsed.option);
+        };
 
     write(parsed.outputPath, result.yaml, out);
     List<String> notices = result.notices;
@@ -100,7 +103,10 @@ public final class OssieDatabricksConverter {
 
   private static void write(String path, String content, PrintStream out) {
     if (path == null) {
-      out.println(content);
+      // print, not println: the serialized YAML already ends in a newline, so stdout and `-o`
+      // produce the same bytes.
+      out.print(content);
+      out.flush();
       return;
     }
     try {
@@ -112,8 +118,37 @@ public final class OssieDatabricksConverter {
 
   private static String usage() {
     return "Usage:\n"
-        + "  ossie-databricks import <model.yaml> [-o <view.yaml>] [--source <dataset>]\n"
-        + "  ossie-databricks export <view.yaml>  [-o <model.yaml>] [--name <model>]";
+        + "  ossie-databricks export <model.yaml> [-o <view.yaml>] [--source <dataset>]\n"
+        + "  ossie-databricks import <view.yaml>  [-o <model.yaml>] [--name <model>]";
+  }
+
+  /**
+   * The two conversion directions, named from the Apache Ossie model's point of view. Each command
+   * accepts exactly one selector flag, so passing the other one is an error rather than a silent
+   * reinterpretation.
+   */
+  private enum Command {
+    /** Apache Ossie -&gt; Metric View. */
+    EXPORT("export", "--source"),
+    /** Metric View -&gt; Apache Ossie. */
+    IMPORT("import", "--name");
+
+    final String name;
+    final String optionFlag;
+
+    Command(String name, String optionFlag) {
+      this.name = name;
+      this.optionFlag = optionFlag;
+    }
+
+    static Command parse(String arg) {
+      for (Command command : values()) {
+        if (command.name.equals(arg)) {
+          return command;
+        }
+      }
+      throw new ExitException(2, "Unknown command '" + arg + "'.\n" + usage());
+    }
   }
 
   /** Parsed command-line arguments: the input file, an optional output file, and the option. */
@@ -128,7 +163,7 @@ public final class OssieDatabricksConverter {
       this.option = option;
     }
 
-    static Args parse(String[] args) {
+    static Args parse(String[] args, Command command) {
       String inputPath = null;
       String outputPath = null;
       String option = null;
@@ -141,6 +176,18 @@ public final class OssieDatabricksConverter {
             break;
           case "--source":
           case "--name":
+            if (!arg.equals(command.optionFlag)) {
+              throw new ExitException(
+                  2,
+                  "Option '"
+                      + arg
+                      + "' is not valid for '"
+                      + command.name
+                      + "'; use '"
+                      + command.optionFlag
+                      + "'.\n"
+                      + usage());
+            }
             option = requireValue(args, ++i, arg);
             break;
           default:

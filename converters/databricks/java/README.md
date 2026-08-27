@@ -1,3 +1,22 @@
+<!--
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing,
+  software distributed under the License is distributed on an
+  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  KIND, either express or implied.  See the License for the
+  specific language governing permissions and limitations
+  under the License.
+-->
+
 # Apache Ossie Databricks Converter
 
 Bidirectional, offline conversion between an [Apache Ossie](https://github.com/apache/ossie)
@@ -5,21 +24,23 @@ semantic model and a Databricks
 [Unity Catalog Metric View](https://docs.databricks.com/aws/en/metric-views/) (YAML `1.1`). Pure
 YAML text in, YAML text out: it reads and writes the two formats as parsed maps and lists.
 
-- **Export** (`MetricViewToOssie`): Metric View -> Apache Ossie. The direction is named from the
-  Metric View's point of view -- it takes a Metric View *out* to Ossie. Metric-View-only features
-  Apache Ossie has no native field for are preserved in `custom_extensions[DATABRICKS]`, so
-  `MV -> Apache Ossie -> MV` is lossless.
-- **Import** (`OssieToMetricView`): Apache Ossie -> Metric View (one fact `source` with a nested
-  `joins` tree and a flat `dimensions` list).
+The directions are named from the Apache Ossie model's point of view, matching the
+[Python converter](../python/README.md):
 
-On **import** (Apache Ossie -> Metric View), Apache Ossie features with no Metric View slot --
-relationship `ai_context`, `dimension.is_time`, non-`DATABRICKS`/`ANSI_SQL` dialects, foreign-vendor
-`custom_extensions` -- are **dropped with a notice**. On **export** (Metric View -> Apache Ossie),
-Metric-View-only features (`filter`, `parameters`, `materialization`, per-column `format`, measure
-`window` / `partition`) are instead **preserved** in `custom_extensions[DATABRICKS]`, so
-`MV -> Apache Ossie -> MV` is lossless. Any input that breaks a [requirement](#requirements)
-**raises a `ConversionException`** -- the converter never silently drops a field or produces an
-invalid result.
+- **Export** (`OssieToMetricView`): Apache Ossie -> Metric View (one fact `source` with a nested
+  `joins` tree and a flat `dimensions` list).
+- **Import** (`MetricViewToOssie`): Metric View -> Apache Ossie. Metric-View-only features Apache
+  Ossie has no native field for are preserved in `custom_extensions[DATABRICKS]`, so
+  `MV -> Apache Ossie -> MV` is lossless.
+
+On **export** (Apache Ossie -> Metric View), Apache Ossie features with no Metric View slot --
+relationship `ai_context`, the non-`synonyms` members of a field/metric `ai_context` object,
+`dimension.is_time`, non-`DATABRICKS`/`ANSI_SQL` dialects, foreign-vendor `custom_extensions` -- are
+**dropped with a notice**. On **import** (Metric View -> Apache Ossie), Metric-View-only features
+(`filter`, `parameters`, `materialization`, per-column `format`, measure `window` / `partition`) are
+instead **preserved** in `custom_extensions[DATABRICKS]`, so `MV -> Apache Ossie -> MV` is lossless.
+Any input that breaks a [requirement](#requirements) **raises a `ConversionException`** -- the
+converter never silently drops a field or produces an invalid result.
 
 ## Requirements
 
@@ -42,55 +63,56 @@ This produces `target/ossie-databricks-converter-0.1.0-SNAPSHOT.jar` with all de
 ### Command line
 
 ```bash
-# import: Apache Ossie -> Metric View
-java -jar target/ossie-databricks-converter-0.1.0-SNAPSHOT.jar import model.yaml -o view.yaml
+# export: Apache Ossie -> Metric View
+java -jar target/ossie-databricks-converter-0.1.0-SNAPSHOT.jar export model.yaml -o view.yaml
 
-# export: Metric View -> Apache Ossie
-java -jar target/ossie-databricks-converter-0.1.0-SNAPSHOT.jar export view.yaml -o model.yaml
+# import: Metric View -> Apache Ossie
+java -jar target/ossie-databricks-converter-0.1.0-SNAPSHOT.jar import view.yaml -o model.yaml
 ```
 
-With no `-o`, output goes to stdout. `--source` (import) picks the fact/grain (default: the FK-sink
-dataset; naming a coarser-grain dataset produces `one_to_many` joins); `--name` (export) sets the
-Apache Ossie model name (default: the source's last identifier). Conversion notices (features
-dropped on import) are written to stderr; a non-convertible input exits non-zero.
+With no `-o`, output goes to stdout. `--source` (export only) picks the fact/grain (default: the
+FK-sink dataset; naming a coarser-grain dataset produces `one_to_many` joins); `--name` (import
+only) sets the Apache Ossie model name (default: the source's last identifier). Passing a command
+its counterpart's flag is an error rather than a silent reinterpretation. Conversion notices
+(features dropped on export) are written to stderr; a non-convertible input exits non-zero.
 
 ### Java API
 
 ```java
 import org.apache.ossie.converter.databricks.OssieConverter;
 
-// export: Metric View -> Apache Ossie (optionally name the model; default: the source's last part)
-OssieConverter.Result ossie = OssieConverter.convertMetricViewToOssie(metricViewYaml, "sales");
-
-// import: Apache Ossie -> Metric View (optionally choose the fact/grain; default: the FK-sink
+// export: Apache Ossie -> Metric View (optionally choose the fact/grain; default: the FK-sink
 // dataset -- naming a coarser-grain dataset produces one_to_many joins)
 OssieConverter.Result view = OssieConverter.convertOssieToMetricView(ossieYaml, "orders");
+
+// import: Metric View -> Apache Ossie (optionally name the model; default: the source's last part)
+OssieConverter.Result ossie = OssieConverter.convertMetricViewToOssie(metricViewYaml, "sales");
 ```
 
 Each `Result` carries the output YAML (`result.yaml`) and any notices raised (`result.notices`,
-the features dropped on import). A broken [requirement](#requirements) throws a
+the features dropped on export). A broken [requirement](#requirements) throws a
 `ConversionException` instead.
 
 ## Mapping
 
 Each row maps in both directions; the **Notes** flag where a behavior is specific to
-**export** (Metric View -> Apache Ossie) or **import** (Apache Ossie -> Metric View).
+**export** (Apache Ossie -> Metric View) or **import** (Metric View -> Apache Ossie).
 
 | Apache Ossie | Metric View (v1.1) | Notes |
 |---|---|---|
 | `semantic_model.description` | `comment` | Model-level description only. |
 | root dataset | `source` | The fact/grain. |
-| other `datasets` | nested `joins[]` | Import: the relationship graph is reassembled into the join tree; a dataset reached by two paths (a diamond) fans out into one aliased join per path. |
-| `relationship` `from_columns`/`to_columns` | join `on` (differing names) / `using` (shared names) | Decomposed into columns on export; rebuilt into `on`/`using` on import. |
-| `relationship.from`/`to` direction | join `cardinality` | Import: source on the many (`from`) side -> `many_to_one`; on the one (`to`) side -> `one_to_many`. |
-| `dataset.primary_key` / `unique_keys` | join `rely.at_most_one_match` | Both directions: import sets `at_most_one_match` when a key covers the join columns; export recovers a `unique_keys` from it. |
-| `dataset.fields[]` | `dimensions[]` | Import: fields flatten into one list and a joined column is qualified by its full join path (`customer.c_name`; `customer.region.r_name` when nested). |
-| `field.expression.dialects[]` | `expr` | Import: prefer the `DATABRICKS` dialect, else `ANSI_SQL`. |
-| `metrics[]` | `measures[]` | Import: fact columns are referenced bare (`SUM(amount)`). |
+| other `datasets` | nested `joins[]` | Export: the relationship graph is reassembled into the join tree; a dataset reached by two paths (a diamond) fans out into one aliased join per path. |
+| `relationship` `from_columns`/`to_columns` | join `on` (differing names) / `using` (shared names) | Decomposed into columns on import; rebuilt into `on`/`using` on export. |
+| `relationship.from`/`to` direction | join `cardinality` | Export: source on the many (`from`) side -> `many_to_one`; on the one (`to`) side -> `one_to_many`. |
+| `dataset.primary_key` / `unique_keys` | join `rely.at_most_one_match` | Both directions: export sets `at_most_one_match` when a key covers the join columns; import recovers a `unique_keys` from it. |
+| `dataset.fields[]` | `dimensions[]` | Export: fields flatten into one list and a joined column is qualified by its full join path (`customer.c_name`; `customer.region.r_name` when nested). |
+| `field.expression.dialects[]` | `expr` | Export: prefer the `DATABRICKS` dialect, else `ANSI_SQL`. |
+| `metrics[]` | `measures[]` | Fact columns are referenced bare (`SUM(amount)`). A joined column is addressed by dataset name in Apache Ossie and by its full join path in the Metric View, so export expands `SUM(region.population)` to `SUM(customer.region.population)` and import maps it back. |
 | `field.label` | `display_name` | |
 | `field` / `metric` `description` | `comment` | |
-| `ai_context.synonyms` | `synonyms` | |
-| `custom_extensions[DATABRICKS]` | `filter`, `parameters`, `materialization`, per-column `format`, measure `window` / `partition` | Export stashes Metric-View-only features here; import restores them -- keeping `MV -> Apache Ossie -> MV` lossless. |
+| `ai_context.synonyms` | `synonyms` | Only `synonyms`: every other member of an `ai_context` object is dropped with a notice. |
+| `custom_extensions[DATABRICKS]` | `filter`, `parameters`, `materialization`, per-column `format`, measure `window` / `partition` | Import stashes Metric-View-only features here; export restores them -- keeping `MV -> Apache Ossie -> MV` lossless. |
 
 ## Requirements
 
@@ -114,16 +136,16 @@ Run the test suite:
 mvn test
 ```
 
-JUnit 5 suites (unit + round-trip) live under `src/test/java/`, with the YAML fixtures in
+JUnit 5 suites (unit, round-trip, CLI) live under `src/test/java/`, with the YAML fixtures in
 `src/test/resources/`. The source layout:
 
 ```
 src/main/java/org/apache/ossie/converter/databricks/
   OssieConverter.java           public facade: entry points + ConversionException/Notices/Result
   OssieConverterCommon.java     shared constants, YAML I/O, map accessors, the stash codec
-  MetricViewToOssie.java        export: Metric View v1.1 -> Apache Ossie
-  OssieToMetricView.java        import: Apache Ossie -> Metric View v1.1
-  OssieDatabricksConverter.java command-line entry point (import / export)
+  OssieToMetricView.java        export: Apache Ossie -> Metric View v1.1
+  MetricViewToOssie.java        import: Metric View v1.1 -> Apache Ossie
+  OssieDatabricksConverter.java command-line entry point (export / import)
 ```
 
 The authoritative contract is Metric View YAML v1.1 as Databricks defines it; the checked-in

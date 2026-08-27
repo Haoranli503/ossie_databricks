@@ -130,12 +130,23 @@ public class OssieConverterRoundTripSuite {
   }
 
   // --- Metric View builder (for MV -> Ossie -> MV) -------------------------
-  private static Object[] buildJoin(
-      Rnd rnd, Names names, String parentAlias, int depth, List<String> ancestorPath) {
+  /**
+   * Builds one join subtree. {@code qualPaths} collects the alias path of every join produced
+   * (`j0`, `j0.j1`, ...) so a measure can be generated over a joined column.
+   *
+   * <p>{@code otm} marks the whole branch one-to-many: a Metric View requires one cardinality per
+   * top-level branch, and a column on a one-to-many-joined table cannot be a dimension (the
+   * converter drops it, as Databricks would reject it), so an otm branch contributes measures but
+   * no dimensions. An otm join is also what makes the import stash the fact hint, so these seeds
+   * are the ones that exercise that path.
+   */
+  private static Object[] buildJoin(Rnd rnd, Names names, String parentAlias, int depth,
+      List<String> ancestorPath, List<String> qualPaths, boolean otm) {
     String name = names.next("j");
     List<String> path = new ArrayList<>(ancestorPath);
     path.add(name);
     String qual = String.join(".", path);
+    qualPaths.add(qual);
     Map<String, Object> join = new LinkedHashMap<>();
     join.put("name", name);
     join.put("source", threePart(rnd));
@@ -156,7 +167,9 @@ public class OssieConverterRoundTripSuite {
       }
       join.put("on", String.join(" AND ", clauses));
     }
-    if (rnd.chance(0.4)) {
+    if (otm) {
+      join.put("cardinality", "one_to_many");
+    } else if (rnd.chance(0.4)) {
       join.put("cardinality", "many_to_one");
     }
     if (rnd.chance(0.3)) {
@@ -165,7 +178,7 @@ public class OssieConverterRoundTripSuite {
       join.put("rely", rely);
     }
     List<Map<String, Object>> dims = new ArrayList<>();
-    int nd = rnd.count(0, 2);
+    int nd = otm ? 0 : rnd.count(0, 2);
     for (int i = 0; i < nd; i++) {
       String col = rnd.colname();
       String expr = rnd.chance(0.7) ? qual + "." + col
@@ -177,7 +190,8 @@ public class OssieConverterRoundTripSuite {
       dims.add(dim);
     }
     if (depth < 2 && rnd.chance(0.35)) {
-      Object[] childResult = buildJoin(rnd, names, name, depth + 1, path);
+      // Cardinality is inherited: a Metric View rejects a branch that mixes the two.
+      Object[] childResult = buildJoin(rnd, names, name, depth + 1, path, qualPaths, otm);
       List<Object> childJoins = new ArrayList<>();
       childJoins.add(childResult[0]);
       join.put("joins", childJoins);
@@ -212,8 +226,10 @@ public class OssieConverterRoundTripSuite {
       fields.add(dim);
     }
     int njoins = rnd.count(0, 2);
+    List<String> qualPaths = new ArrayList<>();
     for (int i = 0; i < njoins; i++) {
-      Object[] jr = buildJoin(rnd, names, "source", 0, new ArrayList<>());
+      Object[] jr = buildJoin(rnd, names, "source", 0, new ArrayList<>(), qualPaths,
+          rnd.chance(0.25));
       joins.add(jr[0]);
       @SuppressWarnings("unchecked")
       List<Map<String, Object>> jdims = (List<Map<String, Object>>) jr[1];
@@ -224,7 +240,15 @@ public class OssieConverterRoundTripSuite {
     for (int i = 0; i < nmeas; i++) {
       Map<String, Object> m = new LinkedHashMap<>();
       m.put("name", names.next("c"));
-      m.put("expr", rnd.pick(List.of(AGGS)) + "(" + rnd.colname() + ")");
+      // A measure over a JOINED column -- `j0.col`, and `j0.j1.col` for a nested join -- is the
+      // shape the qualifier rewrite exists to handle: the import de-aliases the path down to the
+      // dataset name and the export expands it back. Generating only `AGG(bare_col)` left both
+      // sides of that rewrite untested. A bare column is left bare deliberately: the export
+      // strips the fact qualifier (`SUM(source.x)` -> `SUM(x)`, the Metric View idiom), so a
+      // `source.`-qualified measure is a normalization rather than a round trip.
+      m.put("expr", !qualPaths.isEmpty() && rnd.chance(0.4)
+          ? rnd.pick(List.of(AGGS)) + "(" + rnd.pick(qualPaths) + "." + rnd.colname() + ")"
+          : rnd.pick(List.of(AGGS)) + "(" + rnd.colname() + ")");
       if (rnd.chance(0.4)) {
         m.put("comment", rnd.text());
       }
@@ -346,8 +370,15 @@ public class OssieConverterRoundTripSuite {
     }
     List<Object> metrics = new ArrayList<>();
     int nm = rnd.count(0, 2);
+    // Datasets other than the fact, whose columns a metric addresses as `<dataset>.col`. The
+    // export rewrites that to the join path the Metric View needs (`parent.child.col` when the
+    // dataset is nested) and the import maps it back, so a qualified metric exercises both halves.
+    List<String> joined = new ArrayList<>(reachable.subList(1, reachable.size()));
     for (int i = 0; i < nm; i++) {
-      metrics.add(ossieField(names.next("c"), rnd.pick(List.of(AGGS)) + "(" + rnd.colname() + ")"));
+      String expr = !joined.isEmpty() && rnd.chance(0.4)
+          ? rnd.pick(List.of(AGGS)) + "(" + rnd.pick(joined) + "." + rnd.colname() + ")"
+          : rnd.pick(List.of(AGGS)) + "(" + rnd.colname() + ")";
+      metrics.add(ossieField(names.next("c"), expr));
     }
     // The converted Metric View needs at least one dimension or measure, so a model whose datasets
     // have no fields and which declares no metrics is outside the round-trippable subset. Give the
