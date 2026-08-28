@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -38,6 +39,37 @@ public class OssieConverterSuite {
   private static Object export(String osi, String source) {
     return OssieConverter.parseYaml(
         OssieConverter.convertOssieToMetricView(osi, source).yaml);
+  }
+
+  private static final class ThrowingBean {
+    public String getValue() {
+      throw new IllegalStateException("expected serialization failure");
+    }
+  }
+
+  private static Map<String, Object> valueThatFailsSerialization() {
+    Map<String, Object> value = new HashMap<>();
+    value.put("bad", new ThrowingBean());
+    return value;
+  }
+
+  private static String ossieModelWithBody(String body) {
+    return "version: '" + OssieConverter.OSSIE_VERSION + "'\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + body;
+  }
+
+  private static String cascadeNotice(String kind, String name, String reference) {
+    return "[" + kind + " '" + name + "'] references dropped '" + reference
+        + "'; dropping (downstream of a dropped field/metric)";
+  }
+
+  private static void assertInvalidOssieInput(String yaml, String expectedReason) {
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertOssieToMetricView(yaml, null));
+    assertEquals(OssieConverter.ConversionException.Kind.INVALID_INPUT, e.getKind());
+    assertEquals(expectedReason, e.getReason());
   }
 
   @Test
@@ -971,5 +1003,367 @@ public class OssieConverterSuite {
         () -> OssieConverter.convertMetricViewToOssie(mv, null));
     assertTrue(e.getMessage().contains("3-part"),
         "expected the same source-shape error the export raises, got: " + e.getMessage());
+  }
+
+  // -- hardening: strict schema/stash parsing and structured failures -------
+
+  @Test
+  public void bareNullOptionalCollectionsConvertLikeAbsent() {
+    // A present-but-null optional collection (the bare `relationships:` YAML idiom) must convert
+    // like an absent key, as the base reader (asList) did. Only a scalar/map there is rejected.
+    String yaml = "version: '" + OssieConverter.OSSIE_VERSION + "'\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.t\n"
+        + "    fields:\n"
+        + "    - name: region\n"
+        + "      expression: {dialects: [{dialect: DATABRICKS, expression: region}]}\n"
+        + "  relationships:\n"
+        + "  metrics:\n"
+        + "  - name: cnt\n"
+        + "    expression: {dialects: [{dialect: DATABRICKS, expression: 'count(*)'}]}\n";
+    String mv = OssieConverter.convertOssieToMetricView(yaml, null).yaml;
+    assertTrue(mv.contains("cnt"), "expected the model to convert, got: " + mv);
+  }
+
+  @Test
+  public void invalidOssieInputHasStructuredFailureDetails() {
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertOssieToMetricView("just a scalar", null));
+    assertEquals(OssieConverter.ConversionException.Kind.INVALID_INPUT, e.getKind());
+    assertEquals("it is not a mapping at the root", e.getReason());
+  }
+
+  @Test
+  public void malformedSchemaCollectionsAreRejected() {
+    assertInvalidOssieInput(
+        "version: '" + OssieConverter.OSSIE_VERSION + "'\nsemantic_model: nope\n",
+        "Apache Ossie YAML: 'semantic_model' must be a list");
+    assertInvalidOssieInput(
+        "version: '" + OssieConverter.OSSIE_VERSION + "'\nsemantic_model:\n- nope\n",
+        "Apache Ossie YAML: 'semantic_model[0]' must be a mapping");
+    assertInvalidOssieInput(
+        ossieModelWithBody("  datasets: nope\n"),
+        "Model 'm': 'datasets' must be a list");
+    assertInvalidOssieInput(
+        ossieModelWithBody("  datasets:\n  - nope\n"),
+        "Model 'm': 'datasets[0]' must be a mapping");
+
+    String dataset =
+        "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.t\n";
+    assertInvalidOssieInput(
+        ossieModelWithBody(dataset + "  relationships: nope\n"),
+        "Model 'm': 'relationships' must be a list");
+    assertInvalidOssieInput(
+        ossieModelWithBody(dataset + "  relationships:\n  - nope\n"),
+        "Model 'm': 'relationships[0]' must be a mapping");
+    assertInvalidOssieInput(
+        ossieModelWithBody(dataset + "    fields: nope\n"),
+        "Dataset 'd': 'fields' must be a list");
+    assertInvalidOssieInput(
+        ossieModelWithBody(dataset + "    fields:\n    - nope\n"),
+        "Dataset 'd': 'fields[0]' must be a mapping");
+    assertInvalidOssieInput(
+        ossieModelWithBody(dataset + "  metrics: nope\n"),
+        "Model 'm': 'metrics' must be a list");
+    assertInvalidOssieInput(
+        ossieModelWithBody(dataset + "  metrics:\n  - nope\n"),
+        "Model 'm': 'metrics[0]' must be a mapping");
+  }
+
+  @Test
+  public void malformedExpressionCollectionsAreRejected() {
+    String datasetPrefix =
+        "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.t\n"
+        + "    fields:\n"
+        + "    - name: id\n";
+    assertInvalidOssieInput(
+        ossieModelWithBody(datasetPrefix + "      expression: nope\n"),
+        "field 'id': 'expression' must be a mapping");
+    assertInvalidOssieInput(
+        ossieModelWithBody(datasetPrefix + "      expression: {dialects: nope}\n"),
+        "field 'id': 'expression.dialects' must be a list");
+    assertInvalidOssieInput(
+        ossieModelWithBody(datasetPrefix + "      expression: {dialects: [nope]}\n"),
+        "field 'id': 'expression.dialects[0]' must be a mapping");
+
+    String validField = datasetPrefix
+        + "      expression:\n"
+        + "        dialects:\n"
+        + "        - {dialect: DATABRICKS, expression: id}\n";
+    assertInvalidOssieInput(
+        ossieModelWithBody(validField
+            + "  metrics:\n"
+            + "  - name: count_id\n"
+            + "    expression: {dialects: nope}\n"),
+        "metric 'count_id': 'expression.dialects' must be a list");
+  }
+
+  @Test
+  public void malformedCustomExtensionsAreRejected() {
+    String validModelBody =
+        "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.t\n"
+        + "    fields:\n"
+        + "    - name: id\n"
+        + "      expression:\n"
+        + "        dialects:\n"
+        + "        - {dialect: DATABRICKS, expression: id}\n";
+    assertInvalidOssieInput(
+        ossieModelWithBody(
+            "  custom_extensions: {vendor_name: DATABRICKS, data: '{}'}\n" + validModelBody),
+        "'custom_extensions' must be a list");
+    assertInvalidOssieInput(
+        ossieModelWithBody("  custom_extensions: [nope]\n" + validModelBody),
+        "'custom_extensions[0]' must be a mapping");
+    assertInvalidOssieInput(
+        ossieModelWithBody(
+            "  custom_extensions:\n"
+            + "  - {vendor_name: DATABRICKS, data: '{}'}\n"
+            + "  - {vendor_name: DATABRICKS, data: '{\"filter\": \"region = 0\"}'}\n"
+            + validModelBody),
+        "at most one DATABRICKS custom_extensions entry is allowed");
+    assertInvalidOssieInput(
+        ossieModelWithBody(
+            "  custom_extensions:\n"
+            + "  - {vendor_name: DATABRICKS, data: 123}\n"
+            + validModelBody),
+        "DATABRICKS custom_extensions data must be a string");
+    assertInvalidOssieInput(
+        ossieModelWithBody(
+            "  custom_extensions:\n"
+            + "  - {vendor_name: DATABRICKS, data: '[]'}\n"
+            + validModelBody),
+        "DATABRICKS custom_extensions data must be a JSON object");
+
+    for (String data : List.of(
+        "filter: x = 1",
+        "{\"filter\": \"x\", \"filter\": \"y\"}",
+        "{\"filter\": \"x\"} true")) {
+      String yaml = ossieModelWithBody(
+          "  custom_extensions:\n"
+          + "  - vendor_name: DATABRICKS\n"
+          + "    data: '" + data + "'\n"
+          + validModelBody);
+      OssieConverter.ConversionException e =
+          assertThrows(OssieConverter.ConversionException.class,
+              () -> OssieConverter.convertOssieToMetricView(yaml, null));
+      assertEquals(OssieConverter.ConversionException.Kind.INVALID_INPUT, e.getKind());
+      assertTrue(e.getReason().startsWith(
+          "DATABRICKS custom_extensions data is not valid JSON:"), e.getReason());
+    }
+  }
+
+  @Test
+  public void oversizedDatasetGraphIsRejectedBeforeRecursiveTraversal() {
+    StringBuilder body = new StringBuilder("  datasets:\n");
+    for (int i = 0; i <= OssieConverterCommon.MAX_JOIN_NODES; i++) {
+      body.append("  - {name: d").append(i).append(", source: c.s.t").append(i).append("}\n");
+    }
+    body.append("  relationships:\n");
+    for (int i = 0; i < OssieConverterCommon.MAX_JOIN_NODES; i++) {
+      body.append("  - {name: r").append(i)
+          .append(", from: d").append(i)
+          .append(", to: d").append(i + 1)
+          .append(", from_columns: [id], to_columns: [id]}\n");
+    }
+
+    OssieConverter.ConversionException e =
+        assertThrows(OssieConverter.ConversionException.class,
+            () -> OssieConverter.convertOssieToMetricView(
+                ossieModelWithBody(body.toString()), null));
+
+    assertTrue(e.getMessage().contains("at most 200 are supported"), e.getMessage());
+  }
+
+  @Test
+  public void onlyTheFirstSemanticModelIsValidatedAndConverted() {
+    String yaml = ossieModelWithBody(
+        "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.t\n"
+        + "    fields:\n"
+        + "    - name: id\n"
+        + "      expression:\n"
+        + "        dialects:\n"
+        + "        - {dialect: DATABRICKS, expression: id}\n")
+        + "- this-ignored-model-is-not-a-mapping\n";
+
+    OssieConverter.Result result = OssieConverter.convertOssieToMetricView(yaml, null);
+
+    assertTrue(result.yaml.contains("name: \"id\""), result.yaml);
+    assertTrue(result.notices.stream().anyMatch(
+        notice -> notice.contains("multiple semantic models")), result.notices.toString());
+  }
+
+  @Test
+  public void duplicateYamlKeysAreRejectedAtEveryDepth() {
+    String topLevel =
+        "version: '" + OssieConverter.OSSIE_VERSION + "'\n"
+        + "version: '" + OssieConverter.OSSIE_VERSION + "'\n"
+        + "semantic_model: []\n";
+    String nested = ossieModelWithBody(
+        "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.first\n"
+        + "    source: c.s.second\n");
+    for (String yaml : List.of(topLevel, nested)) {
+      OssieConverter.ConversionException e =
+          assertThrows(OssieConverter.ConversionException.class,
+              () -> OssieConverter.convertOssieToMetricView(yaml, null));
+      assertEquals(OssieConverter.ConversionException.Kind.INVALID_INPUT, e.getKind());
+      assertTrue(e.getReason().contains("duplicate key"), e.getReason());
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void reverseOrderedDropChainIsPropagatedWithoutRepeatedFullScans() {
+    // Every field depends on the preceding field, but reverse source order means the old repeated
+    // pass implementation could discover only one new drop per pass.
+    int chainLength = 400;
+    StringBuilder body = new StringBuilder(
+        "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.d\n"
+        + "    fields:\n");
+    for (int index = chainLength; index >= 1; index--) {
+      body.append("    - name: d").append(index).append("\n")
+          .append("      expression:\n")
+          .append("        dialects:\n")
+          .append("        - {dialect: DATABRICKS, expression: d")
+          .append(index - 1).append("}\n");
+    }
+    body.append("    - name: d0\n")
+        .append("      expression:\n")
+        .append("        dialects:\n")
+        .append("        - {dialect: SNOWFLAKE, expression: d0}\n")
+        .append("  metrics:\n")
+        .append("  - name: row_count\n")
+        .append("    expression:\n")
+        .append("      dialects:\n")
+        .append("      - {dialect: DATABRICKS, expression: count(*)}\n");
+
+    OssieConverter.Result result =
+        OssieConverter.convertOssieToMetricView(ossieModelWithBody(body.toString()), null);
+    Map<String, Object> view = (Map<String, Object>) OssieConverter.parseYaml(result.yaml);
+
+    assertFalse(view.containsKey("dimensions"), result.yaml);
+    assertEquals(1, ((List<Object>) view.get("measures")).size(), result.yaml);
+    assertEquals(chainLength + 1, result.notices.size(), result.notices.toString());
+    List<String> cascadeNotices = result.notices.stream()
+        .filter(notice -> notice.contains("downstream of a dropped field/metric"))
+        .toList();
+    assertEquals(chainLength, cascadeNotices.size(), cascadeNotices.toString());
+    for (int index = 1; index <= chainLength; index++) {
+      assertEquals(
+          cascadeNotice("dimension", "d" + index, "d" + (index - 1)),
+          cascadeNotices.get(index - 1));
+    }
+  }
+
+  @Test
+  public void cascadeDropPreservesDimensionThenMeasurePhaseOrder() {
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.d\n"
+        + "    fields:\n"
+        + "    - {name: d1, expression: {dialects: "
+        + "[{dialect: DATABRICKS, expression: bad_dim}]}}\n"
+        + "    - {name: d0, expression: {dialects: "
+        + "[{dialect: DATABRICKS, expression: 'measure(m1)'}]}}\n"
+        + "    - {name: bad_dim, expression: {dialects: "
+        + "[{dialect: SNOWFLAKE, expression: bad_dim}]}}\n"
+        + "  metrics:\n"
+        + "  - {name: m1, expression: {dialects: "
+        + "[{dialect: DATABRICKS, expression: 'measure(bad_measure)'}]}}\n"
+        + "  - {name: m0, expression: {dialects: "
+        + "[{dialect: DATABRICKS, expression: d0}]}}\n"
+        + "  - {name: bad_measure, expression: {dialects: "
+        + "[{dialect: SNOWFLAKE, expression: bad_measure}]}}\n"
+        + "  - {name: keep, expression: {dialects: "
+        + "[{dialect: DATABRICKS, expression: 'count(*)'}]}}\n";
+
+    OssieConverter.Result result = OssieConverter.convertOssieToMetricView(osi, null);
+    List<String> cascadeNotices = result.notices.stream()
+        .filter(notice -> notice.contains("downstream of a dropped field/metric"))
+        .toList();
+
+    assertEquals(List.of(
+        cascadeNotice("dimension", "d1", "bad_dim"),
+        cascadeNotice("measure", "m1", "bad_measure"),
+        cascadeNotice("dimension", "d0", "m1"),
+        cascadeNotice("measure", "m0", "d0")), cascadeNotices);
+  }
+
+  @Test
+  public void invalidMetricViewInputHasStructuredFailureDetails() {
+    OssieConverter.ConversionException scalarError =
+        assertThrows(OssieConverter.ConversionException.class,
+            () -> OssieConverter.convertMetricViewToOssie("just a scalar", null));
+    assertEquals(OssieConverter.ConversionException.Kind.INVALID_INPUT, scalarError.getKind());
+    assertEquals("it is not a mapping at the root", scalarError.getReason());
+
+    OssieConverter.ConversionException parseError =
+        assertThrows(OssieConverter.ConversionException.class,
+            () -> OssieConverter.convertMetricViewToOssie("version: [1", null));
+    assertEquals(OssieConverter.ConversionException.Kind.INVALID_INPUT, parseError.getKind());
+    assertTrue(parseError.getReason().startsWith("failed to parse YAML:"));
+
+    OssieConverter.ConversionException emptyError =
+        assertThrows(OssieConverter.ConversionException.class,
+            () -> OssieConverter.convertMetricViewToOssie("   ", null));
+    assertEquals(OssieConverter.ConversionException.Kind.INVALID_INPUT, emptyError.getKind());
+    assertEquals("the input is empty", emptyError.getReason());
+
+    OssieConverter.ConversionException missingVersionError =
+        assertThrows(OssieConverter.ConversionException.class,
+            () -> OssieConverter.convertMetricViewToOssie("source: c.s.t", null));
+    assertEquals(
+        OssieConverter.ConversionException.Kind.INVALID_INPUT, missingVersionError.getKind());
+    assertEquals("it is missing the required 'version' field", missingVersionError.getReason());
+  }
+
+  @Test
+  public void reverseDirectionSerializationFailuresAreInternalErrors() {
+    Map<String, Object> invalid = valueThatFailsSerialization();
+
+    OssieConverter.ConversionException yamlError =
+        assertThrows(OssieConverter.ConversionException.class,
+            () -> MetricViewToOssie.serializeOssie(invalid, new OssieConverter.Notices()));
+    assertEquals(OssieConverter.ConversionException.Kind.INTERNAL_ERROR, yamlError.getKind());
+
+    OssieConverter.ConversionException stashError =
+        assertThrows(OssieConverter.ConversionException.class,
+            () -> OssieConverterCommon.writeStash(new HashMap<>(), invalid));
+    assertEquals(OssieConverter.ConversionException.Kind.INTERNAL_ERROR, stashError.getKind());
+  }
+
+  @Test
+  public void publicYamlHelpersHaveStructuredFailureKinds() {
+    OssieConverter.ConversionException parseError =
+        assertThrows(OssieConverter.ConversionException.class,
+            () -> OssieConverter.parseYaml("version: [1"));
+    assertEquals(OssieConverter.ConversionException.Kind.INVALID_INPUT, parseError.getKind());
+    assertEquals(parseError.getMessage(), parseError.getReason());
+    assertTrue(parseError.getCause() != null);
+
+    OssieConverter.ConversionException dumpError =
+        assertThrows(OssieConverter.ConversionException.class,
+            () -> OssieConverter.dumpYaml(valueThatFailsSerialization()));
+    assertEquals(OssieConverter.ConversionException.Kind.INTERNAL_ERROR, dumpError.getKind());
+    assertEquals(dumpError.getMessage(), dumpError.getReason());
+    assertTrue(dumpError.getCause() != null);
   }
 }

@@ -28,14 +28,18 @@ import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.fasterxml.jackson.dataformat.yaml.YAMLGenerator;
 
+import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
 import org.yaml.snakeyaml.nodes.Tag;
+import org.yaml.snakeyaml.representer.Representer;
 import org.yaml.snakeyaml.resolver.Resolver;
 
 import org.apache.ossie.converter.databricks.OssieConverter.ConversionException;
@@ -69,13 +73,13 @@ final class OssieConverterCommon {
       Pattern.compile("(?i)^(select|with)\\b");
 
   static final ObjectMapper MAPPER = buildMapper();
+  private static final ObjectMapper JSON_READER = new ObjectMapper()
+      .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+      .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
   // Writer for the custom_extensions stash blob. The exact byte format is pinned by the
   // checked-in fixtures: a space after ':' and ', ' between entries, as in
   // {"_v": 1, "filter": "x"}.
   static final com.fasterxml.jackson.databind.ObjectWriter JSON_WRITER = buildJsonWriter();
-  // Reader for the same blob. It is JSON, so parse it as JSON: the YAML mapper would also accept
-  // input JSON_WRITER never emits, silently widening the stash format.
-  private static final ObjectMapper JSON_READER = new ObjectMapper();
 
   /** A MinimalPrettyPrinter (no newlines) using the stash blob's separators: ": " / ", ". */
   private static final class JsonDumpsPrinter
@@ -146,13 +150,19 @@ final class OssieConverterCommon {
     }
   }
 
-  private static final ThreadLocal<Yaml> YAML_READER = ThreadLocal.withInitial(() ->
-      new Yaml(new SafeConstructor(new LoaderOptions()), new org.yaml.snakeyaml.representer.Representer(
-          new org.yaml.snakeyaml.DumperOptions()), new org.yaml.snakeyaml.DumperOptions(),
-          new LoaderOptions(), new Yaml12Resolver()));
+  // SnakeYAML readers are stateful; create one per conversion instead of retaining thread-local
+  // state on caller threads. Yaml also copies settings from loaderOptions into its constructor, so
+  // the constructor and reader must receive the same configured instance.
+  private static Yaml newYamlReader() {
+    LoaderOptions loaderOptions = new LoaderOptions();
+    loaderOptions.setAllowDuplicateKeys(false);
+    DumperOptions dumperOptions = new DumperOptions();
+    return new Yaml(new SafeConstructor(loaderOptions), new Representer(dumperOptions),
+        dumperOptions, loaderOptions, new Yaml12Resolver());
+  }
 
   static Object loadYaml(String s) {
-    return YAML_READER.get().load(s);
+    return newYamlReader().load(s);
   }
 
   private OssieConverterCommon() {}
@@ -426,15 +436,37 @@ final class OssieConverterCommon {
     return false;
   }
 
-  static String pickExpression(Object osiExpression) {
+  static String pickExpression(Object osiExpression, String scope) {
     // Keep the raw (possibly non-string) values so
     // the type check below can fire; select DATABRICKS-or-ANSI by truthiness (`or`), so a
     // null/empty DATABRICKS expr falls through to ANSI; and raise on a non-string chosen
     // value rather than silently coercing it.
+    if (osiExpression == null) {
+      return null;
+    }
+    if (!(osiExpression instanceof Map)) {
+      String reason = scope + ": 'expression' must be a mapping";
+      throw ConversionException.invalidInput(reason, reason);
+    }
+    Map<String, Object> expression = asMap(osiExpression);
+    Object dialectValues = get(expression, "dialects");
+    if (dialectValues == null) {
+      return null;
+    }
+    if (!(dialectValues instanceof List)) {
+      String reason = scope + ": 'expression.dialects' must be a list";
+      throw ConversionException.invalidInput(reason, reason);
+    }
     Map<String, Object> dialects = new LinkedHashMap<>();
-    for (Object d : asList(get(asMap(osiExpression), "dialects"))) {
-      Map<String, Object> dm = asMap(d);
+    int index = 0;
+    for (Object d : (List<Object>) dialectValues) {
+      if (!(d instanceof Map)) {
+        String reason = scope + ": 'expression.dialects[" + index + "]' must be a mapping";
+        throw ConversionException.invalidInput(reason, reason);
+      }
+      Map<String, Object> dm = (Map<String, Object>) d;
       dialects.put(str(get(dm, "dialect")), get(dm, "expression"));
+      index++;
     }
     Object chosen = truthy(dialects.get(DIALECT_DATABRICKS))
         ? dialects.get(DIALECT_DATABRICKS) : dialects.get(DIALECT_ANSI);
@@ -493,34 +525,69 @@ final class OssieConverterCommon {
     return desc;
   }
 
+  private static List<Map<String, Object>> customExtensions(Map<String, Object> obj) {
+    Object value = get(obj, "custom_extensions");
+    if (value == null) {
+      return new ArrayList<>();
+    }
+    if (!(value instanceof List)) {
+      String reason = "'custom_extensions' must be a list";
+      throw ConversionException.invalidInput(reason, reason);
+    }
+    List<Map<String, Object>> extensions = new ArrayList<>();
+    int index = 0;
+    for (Object extension : (List<Object>) value) {
+      if (!(extension instanceof Map)) {
+        String reason = "'custom_extensions[" + index + "]' must be a mapping";
+        throw ConversionException.invalidInput(reason, reason);
+      }
+      extensions.add((Map<String, Object>) extension);
+      index++;
+    }
+    return extensions;
+  }
+
   static Map<String, Object> readStash(Map<String, Object> obj) {
-    for (Object extObj : asList(get(obj, "custom_extensions"))) {
-      Map<String, Object> ext = asMap(extObj);
+    Map<String, Object> stash = null;
+    for (Map<String, Object> ext : customExtensions(obj)) {
       if (VENDOR.equals(str(get(ext, "vendor_name")))) {
+        if (stash != null) {
+          String reason = "at most one DATABRICKS custom_extensions entry is allowed";
+          throw ConversionException.invalidInput(reason, reason);
+        }
         // A null or empty-string `data` is treated as an empty object rather than a parse error.
-        String data = str(get(ext, "data"));
+        Object dataValue = get(ext, "data");
+        if (dataValue != null && !(dataValue instanceof String)) {
+          String reason = "DATABRICKS custom_extensions data must be a string";
+          throw ConversionException.invalidInput(reason, reason);
+        }
+        String data = (String) dataValue;
         if (data == null || data.isEmpty()) {
           data = "{}";
         }
-        Map<String, Object> parsed;
+        Object parsedValue;
         try {
-          parsed = asMap(JSON_READER.readValue(data, Object.class));
+          parsedValue = JSON_READER.readValue(data, Object.class);
         } catch (Exception e) {
-          throw new ConversionException(
-              "DATABRICKS custom_extensions data is not valid JSON: " + e.getMessage(), e);
+          String reason = "DATABRICKS custom_extensions data is not valid JSON: " + e.getMessage();
+          throw ConversionException.invalidInput(reason, reason, e);
         }
-        parsed.remove("_v");
-        return parsed;
+        if (!(parsedValue instanceof Map)) {
+          String reason = "DATABRICKS custom_extensions data must be a JSON object";
+          throw ConversionException.invalidInput(reason, reason);
+        }
+        stash = (Map<String, Object>) parsedValue;
+        stash.remove("_v");
       }
     }
-    return new LinkedHashMap<>();
+    return stash != null ? stash : new LinkedHashMap<>();
   }
 
   static List<Object> foreignVendorExtensions(Map<String, Object> obj) {
     List<Object> out = new ArrayList<>();
-    for (Object extObj : asList(get(obj, "custom_extensions"))) {
-      if (!VENDOR.equals(str(get(asMap(extObj), "vendor_name")))) {
-        out.add(extObj);
+    for (Map<String, Object> extension : customExtensions(obj)) {
+      if (!VENDOR.equals(str(get(extension, "vendor_name")))) {
+        out.add(extension);
       }
     }
     return out;
@@ -539,7 +606,7 @@ final class OssieConverterCommon {
     try {
       blob = JSON_WRITER.writeValueAsString(payload);
     } catch (Exception e) {
-      throw new ConversionException("failed to serialize stash: " + e.getMessage(), e);
+      throw ConversionException.internalError("failed to serialize stash: " + e.getMessage(), e);
     }
     // Jackson emits unicode escapes with uppercase hex; the stash format uses lowercase. Lowercase
     // just the 4 hex digits of each real escape, preserving any escaped-backslash run in front of
@@ -589,7 +656,8 @@ final class OssieConverterCommon {
     try {
       return loadYaml(s);
     } catch (Exception e) {
-      throw new ConversionException("failed to parse YAML: " + e.getMessage(), e);
+      String message = "failed to parse YAML: " + e.getMessage();
+      throw ConversionException.invalidInput(message, message, e);
     }
   }
 
@@ -599,7 +667,7 @@ final class OssieConverterCommon {
     try {
       return MAPPER.writeValueAsString(obj);
     } catch (Exception e) {
-      throw new ConversionException("failed to serialize YAML: " + e.getMessage(), e);
+      throw ConversionException.internalError("failed to serialize YAML: " + e.getMessage(), e);
     }
   }
 }

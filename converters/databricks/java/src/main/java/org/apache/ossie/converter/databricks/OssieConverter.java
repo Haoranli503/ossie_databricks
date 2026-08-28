@@ -51,11 +51,60 @@ public final class OssieConverter {
 
   /** Raised for any input the converter refuses to convert (Java twin of ConversionError). */
   public static final class ConversionException extends RuntimeException {
-    public ConversionException(String message) {
-      super(message);
+    /** Stable failure categories for callers that need structured error handling. */
+    public enum Kind {
+      INVALID_INPUT,
+      UNSUPPORTED_VERSION,
+      NOT_REPRESENTABLE,
+      INTERNAL_ERROR
     }
+
+    private final Kind kind;
+    private final String reason;
+    private final String unsupportedVersion;
+
+    public ConversionException(String message) {
+      this(Kind.NOT_REPRESENTABLE, message, message, null, null);
+    }
+
     public ConversionException(String message, Throwable cause) {
+      this(Kind.NOT_REPRESENTABLE, message, message, null, cause);
+    }
+
+    private ConversionException(
+        Kind kind, String message, String reason, String unsupportedVersion, Throwable cause) {
       super(message, cause);
+      this.kind = kind;
+      this.reason = reason;
+      this.unsupportedVersion = unsupportedVersion;
+    }
+
+    static ConversionException invalidInput(String message, String reason) {
+      return new ConversionException(Kind.INVALID_INPUT, message, reason, null, null);
+    }
+
+    static ConversionException invalidInput(String message, String reason, Throwable cause) {
+      return new ConversionException(Kind.INVALID_INPUT, message, reason, null, cause);
+    }
+
+    static ConversionException unsupportedVersion(String message, String version) {
+      return new ConversionException(Kind.UNSUPPORTED_VERSION, message, message, version, null);
+    }
+
+    static ConversionException internalError(String message, Throwable cause) {
+      return new ConversionException(Kind.INTERNAL_ERROR, message, message, null, cause);
+    }
+
+    public Kind getKind() {
+      return kind;
+    }
+
+    public String getReason() {
+      return reason;
+    }
+
+    public String getUnsupportedVersion() {
+      return unsupportedVersion;
     }
   }
 

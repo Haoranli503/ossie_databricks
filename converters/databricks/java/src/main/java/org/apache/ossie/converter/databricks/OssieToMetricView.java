@@ -48,6 +48,7 @@ import static org.apache.ossie.converter.databricks.OssieConverterCommon.validat
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -95,56 +96,80 @@ final class OssieToMetricView {
   // -- public entry ---------------------------------------------------------
   static Result convertOssieToMetricView(String osiYamlStr, String source) {
     Notices notices = new Notices();
-    Map<String, Object> root;
+    if (osiYamlStr == null || osiYamlStr.trim().isEmpty()) {
+      throw ConversionException.invalidInput(
+          "Invalid Apache Ossie YAML: expected a mapping at the root", "the input is empty");
+    }
+    Object parsed;
     try {
-      root = asMap(loadYaml(osiYamlStr));
+      parsed = loadYaml(osiYamlStr);
     } catch (Exception e) {
-      throw new ConversionException("Invalid Apache Ossie YAML: " + e.getMessage(), e);
+      throw ConversionException.invalidInput(
+          "Invalid Apache Ossie YAML: " + e.getMessage(),
+          "failed to parse YAML: " + e.getMessage(),
+          e);
     }
-    if (root.isEmpty()) {
-      throw new ConversionException("Invalid Apache Ossie YAML: expected a mapping at the root");
+    if (!(parsed instanceof Map)) {
+      throw ConversionException.invalidInput(
+          "Invalid Apache Ossie YAML: expected a mapping at the root",
+          "it is not a mapping at the root");
     }
-    String version = str(get(root, "version"));
+    Map<String, Object> root = asMap(parsed);
+    Object versionValue = get(root, "version");
+    String version = str(versionValue);
+    if (versionValue == null || version.trim().isEmpty()) {
+      throw ConversionException.invalidInput(
+          "Invalid Apache Ossie YAML: missing required 'version' field",
+          "it is missing the required 'version' field");
+    }
     if (!OSSIE_VERSION.equals(version)) {
-      throw new ConversionException(
-          "Unsupported Apache Ossie version '" + version + "'. Supported: " + OSSIE_VERSION);
+      throw ConversionException.unsupportedVersion(
+          "Unsupported Apache Ossie version '" + version + "'. Supported: " + OSSIE_VERSION,
+          version);
     }
-    List<Object> models = asList(get(root, "semantic_model"));
+    List<Object> models = schemaList(root, "semantic_model", "Apache Ossie YAML");
     if (models.isEmpty()) {
-      throw new ConversionException("'semantic_model' must be a non-empty list");
+      throw ConversionException.invalidInput(
+          "'semantic_model' must be a non-empty list",
+          "its 'semantic_model' must be a non-empty list");
+    }
+    if (!(models.get(0) instanceof Map)) {
+      String reason = "Apache Ossie YAML: 'semantic_model[0]' must be a mapping";
+      throw ConversionException.invalidInput(reason, reason);
     }
     if (models.size() > 1) {
       notices.warn("model", "multiple semantic models found; converting only the first");
     }
-    Map<String, Object> view = convertModel(asMap(models.get(0)), source, notices);
+    Map<String, Object> view = convertModel((Map<String, Object>) models.get(0), source, notices);
     try {
       return new Result(MAPPER.writeValueAsString(view), notices.toList());
     } catch (Exception e) {
-      throw new ConversionException("failed to serialize Metric View YAML: " + e.getMessage(), e);
+      throw ConversionException.internalError(
+          "failed to serialize Metric View YAML: " + e.getMessage(), e);
     }
   }
 
   private static Map<String, Object> convertModel(
       Map<String, Object> model, String explicitSource, Notices notices) {
     String name = model.containsKey("name") ? str(get(model, "name")) : "<unnamed>";
-    List<Object> datasetList = asList(get(model, "datasets"));
+    String modelScope = "Model '" + name + "'";
+    List<Map<String, Object>> datasetList = schemaMapList(model, "datasets", modelScope);
     if (datasetList.isEmpty()) {
       throw new ConversionException("Model '" + name + "' has no datasets");
     }
     Set<String> seen = new HashSet<>();
     Map<String, Map<String, Object>> datasets = new LinkedHashMap<>();
-    for (Object dObj : datasetList) {
-      Map<String, Object> d = asMap(dObj);
+    Map<String, List<Map<String, Object>>> datasetFields = new LinkedHashMap<>();
+    for (Map<String, Object> d : datasetList) {
       String dsName = requireStr(d, "name", "Model '" + name + "': dataset");
       if (!seen.add(dsName.trim().toLowerCase(Locale.ROOT))) {
         throw new ConversionException("Model '" + name + "': duplicate dataset name '" + dsName + "'");
       }
       datasets.put(dsName, d);
+      datasetFields.put(dsName, schemaMapList(d, "fields", "Dataset '" + dsName + "'"));
     }
-    List<Map<String, Object>> relationships = new ArrayList<>();
-    for (Object r : asList(get(model, "relationships"))) {
-      relationships.add(asMap(r));
-    }
+    List<Map<String, Object>> relationships = schemaMapList(model, "relationships", modelScope);
+    List<Map<String, Object>> metrics = schemaMapList(model, "metrics", modelScope);
 
     Map<String, Object> modelStash = readStash(model);
     String factHint = explicitSource != null ? explicitSource : str(get(modelStash, STASH_SOURCE_KEY));
@@ -195,8 +220,7 @@ final class OssieToMetricView {
         // wins, matching the order dimensions are emitted in.
         datasetAliasPath.putIfAbsent(node.dataset, qualifier);
       }
-      for (Object fObj : asList(get(datasets.get(node.dataset), "fields"))) {
-        Map<String, Object> field = asMap(fObj);
+      for (Map<String, Object> field : datasetFields.get(node.dataset)) {
         String fname = requireStr(field, "name", "dataset '" + node.dataset + "': field");
         if (node.isOtm) {
           notices.warn("field '" + fname + "'",
@@ -226,11 +250,11 @@ final class OssieToMetricView {
     Pattern factQualifier = Pattern.compile("\\b" + Pattern.quote(fact) + "\\.");
     // Likewise fixed once the join tree is walked: one alternation over the joined dataset names.
     Pattern datasetHead = qualifierChainPattern(datasetAliasPath.keySet());
-    for (Object mObj : asList(get(model, "metrics"))) {
-      Map<String, Object> measure = convertMetric(
-          asMap(mObj), factQualifier, datasetHead, datasetAliasPath, seenDims, notices);
+    for (Map<String, Object> metric : metrics) {
+      Map<String, Object> measure =
+          convertMetric(metric, factQualifier, datasetHead, datasetAliasPath, seenDims, notices);
       if (measure == null) {
-        droppedMeasures.add(str(get(asMap(mObj), "name")));
+        droppedMeasures.add(str(get(metric, "name")));
         continue;
       }
       measures.add(measure);
@@ -240,7 +264,7 @@ final class OssieToMetricView {
 
     // A Metric View must define at least one dimension or measure
     // (SingleSourceMetricView.validate rejects an empty `select`), so a view with neither is one
-    // Databricks refuses at CREATE. Fail here instead, naming the dropped columns: after
+    // the engine refuses at CREATE. Fail here instead, naming the dropped columns: after
     // cascadeDrop the emptiness is usually a consequence of earlier drops rather than an empty
     // input, and those names are the actionable part.
     if (dimensions.isEmpty() && measures.isEmpty()) {
@@ -276,6 +300,42 @@ final class OssieToMetricView {
     return view;
   }
 
+  private static List<Map<String, Object>> schemaMapList(
+      Map<String, Object> parent, String key, String scope) {
+    List<Object> values = schemaList(parent, key, scope);
+    List<Map<String, Object>> result = new ArrayList<>();
+    int index = 0;
+    for (Object element : values) {
+      if (!(element instanceof Map)) {
+        String reason = scope + ": '" + key + "[" + index + "]' must be a mapping";
+        throw ConversionException.invalidInput(reason, reason);
+      }
+      result.add((Map<String, Object>) element);
+      index++;
+    }
+    return result;
+  }
+
+  private static List<Object> schemaList(
+      Map<String, Object> parent, String key, String scope) {
+    if (!parent.containsKey(key)) {
+      return new ArrayList<>();
+    }
+    Object value = get(parent, key);
+    // A present-but-null value (the bare `key:` YAML idiom) is treated like an absent key, matching
+    // the tolerant base reader (asList) and the sibling customExtensions reader. A scalar or map
+    // value is still rejected below. Required collections stay guarded by their own emptiness
+    // checks, so tolerating null here does not let an empty semantic_model/datasets through.
+    if (value == null) {
+      return new ArrayList<>();
+    }
+    if (!(value instanceof List)) {
+      String reason = scope + ": '" + key + "' must be a list";
+      throw ConversionException.invalidInput(reason, reason);
+    }
+    return (List<Object>) value;
+  }
+
   private static Object[] buildJoinTree(
       String modelName, Map<String, Map<String, Object>> datasets,
       List<Map<String, Object>> relationships0, String factHint, Notices notices) {
@@ -292,6 +352,10 @@ final class OssieToMetricView {
     List<Map<String, Object>> relationships = new ArrayList<>();
     for (Map<String, Object> rel : relationships0) {
       relationships.add(orientByKey(rel, datasets, notices));
+    }
+    if (datasets.size() > MAX_JOIN_NODES) {
+      throw new ConversionException("Model '" + modelName + "' has " + datasets.size()
+          + " datasets; at most " + MAX_JOIN_NODES + " are supported.");
     }
     String fact = pickFact(modelName, datasets, relationships, factHint);
     rejectDirectedCycle(modelName, datasets, relationships);
@@ -454,7 +518,7 @@ final class OssieToMetricView {
    * `Join.validateSubJoinCardinalities` seeds the expected value from the top-level join and fails
    * any descendant that differs (an absent `cardinality` reads as `many_to_one`). So a mixed branch
    * is rejected in *either* direction -- a many-to-one nested under one-to-many, and equally a
-   * one-to-many nested under many-to-one. Emitting one would produce a view Databricks refuses at
+   * one-to-many nested under many-to-one. Emitting one would produce a view the engine refuses at
    * CREATE, so reject it here with a converter-level error instead.
    */
   private static void markOtm(String modelName, Node root) {
@@ -707,7 +771,7 @@ final class OssieToMetricView {
   private static Map<String, Object> convertField(Map<String, Object> field, String name0,
       String qualifier, boolean isFact, String prefix, Notices notices) {
     String scope = "field '" + name0 + "'";
-    String expr = pickExpression(get(field, "expression"));
+    String expr = pickExpression(get(field, "expression"), scope);
     if (expr == null) {
       notices.warn(scope, "no DATABRICKS/ANSI_SQL dialect; dropping field");
       return null;
@@ -760,7 +824,7 @@ final class OssieToMetricView {
       throw new ConversionException("metric '" + name + "' collides with another dimension/measure; "
           + "Metric Views require unique dimension/measure names -- rename before use");
     }
-    String expr = pickExpression(get(metric, "expression"));
+    String expr = pickExpression(get(metric, "expression"), scope);
     if (expr == null) {
       notices.warn(scope, "no DATABRICKS/ANSI_SQL dialect; dropping metric");
       return null;
@@ -801,76 +865,194 @@ final class OssieToMetricView {
     return measure;
   }
 
-  /**
-   * The name of a dropped measure/dimension this expression references, or null.
-   *
-   * <p>Matched against SQL code only: a dropped name that merely occurs inside a string literal --
-   * {@code SUM(IF(region = 'us', amount, 0))} where a field named `us` was dropped -- is not a
-   * reference, and dropping the column for it would silently change the view. The rewrite paths
-   * skip literals for the same reason.
-   */
-  private static String referencesDropped(String expr, String selfName, Set<String> droppedDims,
-      Set<String> droppedMeasures, Map<String, Pattern> refPatterns) {
-    for (String m : droppedMeasures) {
-      if (m == null) {
-        continue;
-      }
-      Pattern p = refPatterns.computeIfAbsent("measure:" + m,
-          k -> Pattern.compile("measure\\(\\s*" + Pattern.quote(m) + "\\s*\\)"));
-      if (findOutsideLiterals(expr, p)) {
-        return m;
-      }
-    }
-    for (String d : droppedDims) {
-      if (d == null || d.equals(selfName)) {
-        continue;
-      }
-      Pattern p = refPatterns.computeIfAbsent("dimension:" + d,
-          k -> Pattern.compile("(?<![\\w.])" + Pattern.quote(d) + "(?![\\w.])"));
-      if (findOutsideLiterals(expr, p)) {
-        return d;
-      }
-    }
-    return null;
-  }
-
   private static void cascadeDrop(List<Map<String, Object>> dimensions,
       List<Map<String, Object>> measures, Set<String> droppedDims,
       Set<String> droppedMeasures, Notices notices) {
-    // A name's pattern never changes and the dropped sets only grow, so compile each one once and
-    // reuse it across every pass and column rather than per (pass x column x dropped name).
-    Map<String, Pattern> refPatterns = new HashMap<>();
-    boolean changed = true;
-    while (changed) {
-      changed = false;
-      changed |= cascadePass(
-          dimensions, "dimension", droppedDims, droppedDims, droppedMeasures, refPatterns, notices);
-      changed |= cascadePass(
-          measures, "measure", droppedMeasures, droppedDims, droppedMeasures, refPatterns, notices);
-    }
+    new CascadeDropper(dimensions, measures, droppedDims, droppedMeasures, notices).run();
   }
 
-  private static boolean cascadePass(List<Map<String, Object>> coll, String kind,
-      Set<String> droppedSet, Set<String> droppedDims, Set<String> droppedMeasures,
-      Map<String, Pattern> refPatterns, Notices notices) {
-    boolean changed = false;
-    List<Map<String, Object>> survivors = new ArrayList<>();
-    for (Map<String, Object> col : coll) {
-      String nm = (String) col.get("name");
-      String ref = referencesDropped(
-          (String) col.get("expr"), nm, droppedDims, droppedMeasures, refPatterns);
-      if (ref != null) {
-        notices.warn(kind + " '" + nm + "'",
-            "references dropped '" + ref + "'; dropping (downstream of a dropped field/metric)");
-        droppedSet.add(nm);
-        changed = true;
-      } else {
-        survivors.add(col);
+  /**
+   * Propagates dropped field/metric references without repeatedly compiling the same patterns or
+   * rescanning every prior drop on every pass. The worklists preserve the old phase order:
+   * dimensions then measures, both in source order, with a dependency discovered after its source
+   * position deferred to the next round. This keeps both output and notice ordering stable.
+   */
+  private static final class CascadeDropper {
+    private static final int SEED_PHASE = 0;
+    private static final int DIMENSION_PHASE = 1;
+    private static final int MEASURE_PHASE = 2;
+
+    private final List<Map<String, Object>> dimensions;
+    private final List<Map<String, Object>> measures;
+    private final Set<String> droppedDims;
+    private final Set<String> droppedMeasures;
+    private final Notices notices;
+    private final BitSet removedDims = new BitSet();
+    private final BitSet removedMeasures = new BitSet();
+    private final Map<String, Pattern> dimensionPatterns = new HashMap<>();
+    private final Map<String, Pattern> measurePatterns = new HashMap<>();
+    private BitSet dimsNow = new BitSet();
+    private BitSet dimsNext = new BitSet();
+    private BitSet measuresNow = new BitSet();
+    private BitSet measuresNext = new BitSet();
+
+    CascadeDropper(List<Map<String, Object>> dimensions,
+        List<Map<String, Object>> measures, Set<String> droppedDims,
+        Set<String> droppedMeasures, Notices notices) {
+      this.dimensions = dimensions;
+      this.measures = measures;
+      this.droppedDims = droppedDims;
+      this.droppedMeasures = droppedMeasures;
+      this.notices = notices;
+    }
+
+    void run() {
+      for (String name : droppedMeasures) {
+        propagate(name, true, SEED_PHASE, -1);
+      }
+      for (String name : droppedDims) {
+        propagate(name, false, SEED_PHASE, -1);
+      }
+
+      while (!dimsNow.isEmpty() || !measuresNow.isEmpty()) {
+        processDimensions();
+        processMeasures();
+        dimsNow = dimsNext;
+        dimsNext = new BitSet();
+        measuresNow = measuresNext;
+        measuresNext = new BitSet();
+      }
+
+      retainSurvivors(dimensions, removedDims);
+      retainSurvivors(measures, removedMeasures);
+    }
+
+    private void processDimensions() {
+      for (int index = dimsNow.nextSetBit(0); index >= 0;
+          index = dimsNow.nextSetBit(index + 1)) {
+        dimsNow.clear(index);
+        drop(index, false, DIMENSION_PHASE);
       }
     }
-    coll.clear();
-    coll.addAll(survivors);
-    return changed;
+
+    private void processMeasures() {
+      for (int index = measuresNow.nextSetBit(0); index >= 0;
+          index = measuresNow.nextSetBit(index + 1)) {
+        measuresNow.clear(index);
+        drop(index, true, MEASURE_PHASE);
+      }
+    }
+
+    private void drop(int index, boolean measure, int phase) {
+      BitSet removed = measure ? removedMeasures : removedDims;
+      if (removed.get(index)) {
+        return;
+      }
+      Map<String, Object> column = (measure ? measures : dimensions).get(index);
+      String name = (String) column.get("name");
+      String reference = referencesDropped((String) column.get("expr"), name);
+      if (reference == null) {
+        return;
+      }
+
+      removed.set(index);
+      String kind = measure ? "measure" : "dimension";
+      notices.warn(kind + " '" + name + "'",
+          "references dropped '" + reference
+              + "'; dropping (downstream of a dropped field/metric)");
+      Set<String> dropped = measure ? droppedMeasures : droppedDims;
+      if (dropped.add(name)) {
+        propagate(name, measure, phase, index);
+      }
+    }
+
+    private void propagate(String name, boolean measureReference, int phase, int sourceIndex) {
+      if (name == null) {
+        return;
+      }
+      Pattern pattern = referencePattern(name, measureReference);
+      for (int index = 0; index < dimensions.size(); index++) {
+        if (!isPending(index, false)
+            && matches(dimensions.get(index), name, measureReference, pattern)) {
+          schedule(index, false, phase, sourceIndex);
+        }
+      }
+      for (int index = 0; index < measures.size(); index++) {
+        if (!isPending(index, true)
+            && matches(measures.get(index), name, measureReference, pattern)) {
+          schedule(index, true, phase, sourceIndex);
+        }
+      }
+    }
+
+    private boolean isPending(int index, boolean measure) {
+      if (measure) {
+        return removedMeasures.get(index)
+            || measuresNow.get(index)
+            || measuresNext.get(index);
+      }
+      return removedDims.get(index) || dimsNow.get(index) || dimsNext.get(index);
+    }
+
+    private static boolean matches(Map<String, Object> column, String reference,
+        boolean measureReference, Pattern pattern) {
+      String name = (String) column.get("name");
+      if (!measureReference && reference.equals(name)) {
+        return false;
+      }
+      String expr = (String) column.get("expr");
+      return expr.contains(reference) && findOutsideLiterals(expr, pattern);
+    }
+
+    private void schedule(int index, boolean measure, int phase, int sourceIndex) {
+      if (measure) {
+        if (phase != MEASURE_PHASE || index > sourceIndex) {
+          measuresNow.set(index);
+        } else {
+          measuresNext.set(index);
+        }
+      } else if (phase == SEED_PHASE
+          || (phase == DIMENSION_PHASE && index > sourceIndex)) {
+        dimsNow.set(index);
+      } else {
+        dimsNext.set(index);
+      }
+    }
+
+    private String referencesDropped(String expr, String selfName) {
+      for (String name : droppedMeasures) {
+        if (name != null && expr.contains(name)
+            && findOutsideLiterals(expr, referencePattern(name, true))) {
+          return name;
+        }
+      }
+      for (String name : droppedDims) {
+        if (name != null && !name.equals(selfName) && expr.contains(name)
+            && findOutsideLiterals(expr, referencePattern(name, false))) {
+          return name;
+        }
+      }
+      return null;
+    }
+
+    private Pattern referencePattern(String name, boolean measure) {
+      Map<String, Pattern> patterns = measure ? measurePatterns : dimensionPatterns;
+      return patterns.computeIfAbsent(name, ignored -> measure
+          ? Pattern.compile("measure\\(\\s*" + Pattern.quote(name) + "\\s*\\)")
+          : Pattern.compile("(?<![\\w.])" + Pattern.quote(name) + "(?![\\w.])"));
+    }
+
+    private static void retainSurvivors(
+        List<Map<String, Object>> columns, BitSet removed) {
+      List<Map<String, Object>> survivors = new ArrayList<>(columns.size() - removed.cardinality());
+      for (int index = 0; index < columns.size(); index++) {
+        if (!removed.get(index)) {
+          survivors.add(columns.get(index));
+        }
+      }
+      columns.clear();
+      columns.addAll(survivors);
+    }
   }
 
   private static List<String> truncateSynonyms(List<String> syns, String scope, Notices notices) {

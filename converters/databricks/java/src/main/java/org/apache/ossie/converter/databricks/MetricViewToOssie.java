@@ -80,19 +80,37 @@ final class MetricViewToOssie {
 
   static Result convertMetricViewToOssie(String mvYamlStr, String modelName) {
     Notices notices = new Notices();
-    Map<String, Object> view;
+    if (mvYamlStr == null || mvYamlStr.trim().isEmpty()) {
+      throw ConversionException.invalidInput(
+          "Invalid Metric View YAML: expected a mapping at the root", "the input is empty");
+    }
+    Object parsed;
     try {
-      view = asMap(loadYaml(mvYamlStr));
+      parsed = loadYaml(mvYamlStr);
     } catch (Exception e) {
-      throw new ConversionException("Invalid Metric View YAML: " + e.getMessage(), e);
+      throw ConversionException.invalidInput(
+          "Invalid Metric View YAML: " + e.getMessage(),
+          "failed to parse YAML: " + e.getMessage(),
+          e);
     }
-    if (view.isEmpty()) {
-      throw new ConversionException("Invalid Metric View YAML: expected a mapping at the root");
+    if (!(parsed instanceof Map)) {
+      throw ConversionException.invalidInput(
+          "Invalid Metric View YAML: expected a mapping at the root",
+          "it is not a mapping at the root");
     }
-    String version = str(get(view, "version"));
+    Map<String, Object> view = asMap(parsed);
+    Object versionValue = get(view, "version");
+    String version = str(versionValue);
+    if (versionValue == null || version.trim().isEmpty()) {
+      throw ConversionException.invalidInput(
+          "Invalid Metric View YAML: missing required 'version' field",
+          "it is missing the required 'version' field");
+    }
     if (!MV_VERSION.equals(version)) {
-      throw new ConversionException("Unsupported Metric View version '" + version
-          + "'. This converter targets v" + MV_VERSION + " only.");
+      throw ConversionException.unsupportedVersion(
+          "Unsupported Metric View version '" + version
+              + "'. This converter targets v" + MV_VERSION + " only.",
+          version);
     }
     Map<String, Object> model = convertView(view, modelName, notices);
     Map<String, Object> out = new LinkedHashMap<>();
@@ -100,10 +118,15 @@ final class MetricViewToOssie {
     List<Object> models = new ArrayList<>();
     models.add(model);
     out.put("semantic_model", models);
+    return serializeOssie(out, notices);
+  }
+
+  static Result serializeOssie(Map<String, Object> out, Notices notices) {
     try {
       return new Result(MAPPER.writeValueAsString(out), notices.toList());
     } catch (Exception e) {
-      throw new ConversionException("failed to serialize Apache Ossie YAML: " + e.getMessage(), e);
+      throw ConversionException.internalError(
+          "failed to serialize Apache Ossie YAML: " + e.getMessage(), e);
     }
   }
 
@@ -322,7 +345,7 @@ final class MetricViewToOssie {
   private static Object[] decomposeOn(
       Map<String, Object> join, String parentAlias, String parentName, String childAlias) {
     // A join may carry both `on` and `using` (Metric View validation only requires that at least
-    // one is present). `on` takes precedence, matching how Databricks resolves the join criteria
+    // one is present). `on` takes precedence, matching how the engine resolves the join criteria
     // in DataModelUtils.getJoinCriteriaExpression: `case (Some(on), _) => ...`. Falling back to
     // `using` when `on` is present would silently join on different columns than the view does.
     String on = str(get(join, "on"));

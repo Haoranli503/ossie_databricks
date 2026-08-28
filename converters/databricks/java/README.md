@@ -35,12 +35,15 @@ The directions are named from the Apache Ossie model's point of view, matching t
 
 On **export** (Apache Ossie -> Metric View), Apache Ossie features with no Metric View slot --
 relationship `ai_context`, the non-`synonyms` members of a field/metric `ai_context` object,
-`dimension.is_time`, non-`DATABRICKS`/`ANSI_SQL` dialects, foreign-vendor `custom_extensions` -- are
-**dropped with a notice**. On **import** (Metric View -> Apache Ossie), Metric-View-only features
-(`filter`, `parameters`, `materialization`, per-column `format`, measure `window` / `partition`) are
-instead **preserved** in `custom_extensions[DATABRICKS]`, so `MV -> Apache Ossie -> MV` is lossless.
-Any input that breaks a [requirement](#requirements) **raises a `ConversionException`** -- the
-converter never silently drops a field or produces an invalid result.
+`dimension.is_time`, foreign-vendor `custom_extensions` -- are **dropped with a notice**. An
+expression prefers the `DATABRICKS` dialect, then `ANSI_SQL`; the other dialect alternatives are
+ignored (no notice) when a supported one is present, while a field or metric with no supported
+dialect is dropped with a notice. On **import** (Metric View -> Apache Ossie), Metric-View-only
+features (`filter`, `parameters`, `materialization`, per-column `format`, measure `window` /
+`partition`) are instead **preserved** in `custom_extensions[DATABRICKS]`, so
+`MV -> Apache Ossie -> MV` is lossless. Any input that breaks a [requirement](#requirements)
+**raises a `ConversionException`** -- the converter never silently drops a field or produces an
+invalid result.
 
 ## Requirements
 
@@ -107,7 +110,7 @@ Each row maps in both directions; the **Notes** flag where a behavior is specifi
 | `relationship.from`/`to` direction | join `cardinality` | Export: source on the many (`from`) side -> `many_to_one`; on the one (`to`) side -> `one_to_many`. |
 | `dataset.primary_key` / `unique_keys` | join `rely.at_most_one_match` | Both directions: export sets `at_most_one_match` when a key covers the join columns; import recovers a `unique_keys` from it. |
 | `dataset.fields[]` | `dimensions[]` | Export: fields flatten into one list and a joined column is qualified by its full join path (`customer.c_name`; `customer.region.r_name` when nested). |
-| `field.expression.dialects[]` | `expr` | Export: prefer the `DATABRICKS` dialect, else `ANSI_SQL`. |
+| `field.expression.dialects[]` | `expr` | Export: prefer the `DATABRICKS` dialect, else `ANSI_SQL`; other alternatives are ignored when a supported one is present, and a field with no supported dialect is dropped with a notice. |
 | `metrics[]` | `measures[]` | Fact columns are referenced bare (`SUM(amount)`). A joined column is addressed by dataset name in Apache Ossie and by its full join path in the Metric View, so export expands `SUM(region.population)` to `SUM(customer.region.population)` and import maps it back. |
 | `field.label` | `display_name` | |
 | `field` / `metric` `description` | `comment` | |
@@ -123,10 +126,17 @@ an input breaks one of these:
 - a `source` is not a 3-part `catalog.schema.table` name or a `SELECT`/`WITH` subquery;
 - the relationship graph is not acyclic and resolvable to a single fact -- a cycle, or multiple
   candidate facts without a chosen source, is rejected (a diamond is allowed and fanned out);
+- an Apache Ossie -> Metric View conversion has more than 200 distinct datasets or expands to more
+  than 200 join nodes;
+- on the first semantic model, a consumed `custom_extensions` value is not a list of mappings, has
+  more than one `DATABRICKS` entry, or has non-empty `DATABRICKS` `data` that is not a string
+  containing one strict JSON object. Duplicate keys, trailing tokens, YAML syntax, and non-object
+  JSON roots are rejected; missing, null, or empty `data` is treated as an empty object.
+  Dataset-level `DATABRICKS` data has no Metric View counterpart and is not consumed;
 - a join has no condition (a cross join has no Apache Ossie relationship form);
 - a join condition is non-equi or otherwise can't be decomposed into equi-join columns (Apache
   Ossie relationships are equi-joins, so the join has no Apache Ossie representation);
-- the input YAML is malformed.
+- the input YAML is malformed or contains duplicate mapping keys.
 
 ## Development
 
