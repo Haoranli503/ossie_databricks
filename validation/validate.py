@@ -43,11 +43,13 @@ Usage:
 
 import json
 import sys
+from collections.abc import Hashable
 from pathlib import Path
 
 try:
     import yaml
     from jsonschema import Draft202012Validator
+    from yaml.constructor import ConstructorError
 except ImportError:
     print("Missing dependencies. Install with:")
     print("  pip install pyyaml jsonschema")
@@ -74,6 +76,66 @@ DIALECT_MAP = {
 
 # Dialects that sqlglot cannot parse
 SKIP_SQL_VALIDATION = {"MDX", "TABLEAU", "MAQL", "THOUGHTSPOT"}
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate explicit mapping keys."""
+
+    MERGE_TAG = "tag:yaml.org,2002:merge"
+
+    def construct_document(self, node: yaml.Node):
+        # Validate the composed node graph before SafeConstructor touches it:
+        # flatten_mapping() rewrites mapping nodes in place while expanding "<<",
+        # so a check that runs during construction sees merged, not authored, keys.
+        self._check_unique_keys(node, set())
+        return super().construct_document(node)
+
+    def _check_unique_keys(self, node: yaml.Node, visited: set) -> None:
+        if id(node) in visited:  # alias or recursive anchor: check the node once
+            return
+        visited.add(id(node))
+
+        if isinstance(node, yaml.MappingNode):
+            seen = set()
+            merge_key = object()
+            for key_node, value_node in node.value:
+                if key_node.tag == self.MERGE_TAG:
+                    key, display_key = merge_key, "<<"
+                elif isinstance(key_node, yaml.ScalarNode):
+                    key = display_key = self.construct_object(key_node, deep=True)
+                else:
+                    # Collection keys are unhashable under SafeLoader. Reject them
+                    # here rather than constructing them, which would run
+                    # flatten_mapping() on the graph this walk must not disturb.
+                    raise ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        "found an unhashable key",
+                        key_node.start_mark,
+                    )
+
+                if not isinstance(key, Hashable):
+                    raise ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        "found an unhashable key",
+                        key_node.start_mark,
+                    )
+
+                if key in seen:
+                    raise ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        f"found duplicate key {display_key!r}",
+                        key_node.start_mark,
+                    )
+                seen.add(key)
+
+                self._check_unique_keys(key_node, visited)
+                self._check_unique_keys(value_node, visited)
+        elif isinstance(node, yaml.SequenceNode):
+            for child in node.value:
+                self._check_unique_keys(child, visited)
 
 
 def validate_schema(data: dict, schema: dict) -> list[str]:
@@ -268,7 +330,7 @@ def main():
 
     with open(yaml_path) as f:
         try:
-            data = yaml.safe_load(f)
+            data = yaml.load(f, Loader=UniqueKeyLoader)
         except yaml.YAMLError as e:
             print(f"Error: Invalid YAML: {e}")
             sys.exit(1)
