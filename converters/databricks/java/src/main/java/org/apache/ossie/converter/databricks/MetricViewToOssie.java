@@ -72,6 +72,12 @@ final class MetricViewToOssie {
   // (they live on MeasureExpression); a dimension never carries them, so the shared key list is
   // simply never hit for those on the dimension path.
   private static final String[] COLUMN_STASH_KEYS = {"format", "window", "partition"};
+  // Measure-only fields with no Apache Ossie Metric representation. A dimension's display_name
+  // maps to the Field `label`, but the Ossie Metric schema has no `label`, so a measure's
+  // display_name is preserved in the DATABRICKS stash instead. Kept separate from
+  // COLUMN_STASH_KEYS so the dimension path (which already maps display_name to `label`) does not
+  // also stash it.
+  private static final String[] MEASURE_STASH_KEYS = {"display_name"};
   private static final Pattern NON_EQUI_RE = Pattern.compile("[<>!]=|<>|[<>]");
   private static final Pattern AND_SPLIT_RE = Pattern.compile("\\s+AND\\s+", Pattern.CASE_INSENSITIVE);
   private static final Pattern EQ_CLAUSE_RE = Pattern.compile("^\\s*(.+?)\\s*=\\s*(.+?)\\s*$");
@@ -488,6 +494,11 @@ final class MetricViewToOssie {
     }
     Map<String, Object> stash = new LinkedHashMap<>();
     for (String k : COLUMN_STASH_KEYS) {
+      if (measure.containsKey(k)) {
+        stash.put(k, measure.get(k));
+      }
+    }
+    for (String k : MEASURE_STASH_KEYS) {
       if (measure.containsKey(k)) {
         stash.put(k, measure.get(k));
       }

@@ -861,6 +861,11 @@ final class OssieToMetricView {
     if (stash.containsKey("partition")) {
       measure.put("partition", stash.get("partition"));
     }
+    // The Ossie Metric schema has no `label`, so a measure's display_name round-trips through the
+    // DATABRICKS stash (MetricViewToOssie.MEASURE_STASH_KEYS) rather than a native field.
+    if (stash.containsKey("display_name")) {
+      measure.put("display_name", stash.get("display_name"));
+    }
     warnDroppedColumn(metric, scope, notices);
     return measure;
   }

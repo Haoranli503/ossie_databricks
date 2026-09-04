@@ -170,6 +170,32 @@ public class OssieConverterSuite {
   }
 
   @Test
+  public void measureDisplayNameSurvivesRoundTripViaStash() {
+    // A dimension's display_name maps to the Ossie Field `label`, but the Ossie Metric schema has
+    // no `label`, so a measure's display_name is preserved in the DATABRICKS custom_extensions
+    // stash (like format/window) and restored on the way back.
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.fact\n"
+        + "dimensions:\n"
+        + "- name: region\n"
+        + "  expr: region\n"
+        + "measures:\n"
+        + "- name: total_revenue\n"
+        + "  expr: SUM(amount)\n"
+        + "  display_name: Total Revenue\n";
+
+    String ossie = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
+    // The only display_name in the input is on the measure; it rides in the metric's stash, since
+    // there is no native Ossie field for it.
+    assertTrue(ossie.contains("display_name"),
+        "expected the measure display_name preserved in the stash, got: " + ossie);
+
+    String mv2 = OssieConverter.convertOssieToMetricView(ossie, null).yaml;
+    assertEquals(OssieConverter.parseYaml(mv), OssieConverter.parseYaml(mv2));
+  }
+
+  @Test
   public void unsupportedVersionIsRejected() {
     OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
         () -> OssieConverter.convertOssieToMetricView("version: '9.9'\nsemantic_model: []\n", null));
