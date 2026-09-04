@@ -112,10 +112,10 @@ Each row maps in both directions; the **Notes** flag where a behavior is specifi
 | `dataset.fields[]` | `dimensions[]` | Export: fields flatten into one list and a joined column is qualified by its full join path (`customer.c_name`; `customer.region.r_name` when nested). |
 | `field.expression.dialects[]` | `expr` | Export: prefer the `DATABRICKS` dialect, else `ANSI_SQL`; other alternatives are ignored when a supported one is present, and a field with no supported dialect is dropped with a notice. |
 | `metrics[]` | `measures[]` | Fact columns are referenced bare (`SUM(amount)`). A joined column is addressed by dataset name in Apache Ossie and by its full join path in the Metric View, so export expands `SUM(region.population)` to `SUM(customer.region.population)` and import maps it back. |
-| `field.label` | `display_name` | |
+| `field.label` | dimension `display_name` | A measure's `display_name` has no `label` on the Apache Ossie metric shape, so it rides in the stash instead (see the `custom_extensions` row). |
 | `field` / `metric` `description` | `comment` | |
 | `ai_context.synonyms` | `synonyms` | Only `synonyms`: every other member of an `ai_context` object is dropped with a notice. |
-| `custom_extensions[DATABRICKS]` | `filter`, `parameters`, `materialization`, per-column `format`, measure `window` / `partition` | Import stashes Metric-View-only features here; export restores them -- keeping `MV -> Apache Ossie -> MV` lossless. |
+| `custom_extensions[DATABRICKS]` | `filter`, `parameters`, `materialization`, per-column `format`, measure `window` / `partition` / `display_name` | Import stashes Metric-View-only features here; export restores them -- keeping `MV -> Apache Ossie -> MV` lossless. |
 
 ## Requirements
 
