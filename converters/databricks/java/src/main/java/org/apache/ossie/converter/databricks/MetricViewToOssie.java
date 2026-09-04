@@ -161,6 +161,9 @@ final class MetricViewToOssie {
     factDs.put("source", source);
     datasets.add(factDs);
     List<Map<String, Object>> relationships = new ArrayList<>();
+    // Joins with no schema-valid Ossie relationship (a non-decomposable `on`) are collected here
+    // and stashed under the model's DATABRICKS custom_extensions instead of `relationships`.
+    List<Map<String, Object>> complexJoins = new ArrayList<>();
     Map<String, String> aliasToDataset = new HashMap<>();
     aliasToDataset.put("source", factName);
     aliasToDataset.put(factName, factName);
@@ -168,7 +171,7 @@ final class MetricViewToOssie {
     seenNames.add(factName.trim().toLowerCase(Locale.ROOT));
 
     walk(factName, "source", asList(get(view, "joins")), datasets, relationships,
-        aliasToDataset, seenNames);
+        complexJoins, aliasToDataset, seenNames, notices);
 
     // `fields` is a v1.1 alias for `dimensions`: an empty `dimensions: []` falls through to
     // `fields`, and the "both set" warning fires only when BOTH are non-empty (not merely
@@ -236,13 +239,17 @@ final class MetricViewToOssie {
     if (hasOtm(asList(get(view, "joins")))) {
       modelStash.put(STASH_SOURCE_KEY, factName);
     }
+    if (!complexJoins.isEmpty()) {
+      modelStash.put("complex_joins", complexJoins);
+    }
     writeStash(model, modelStash);
     return model;
   }
 
   private static void walk(String parentName, String parentAlias, List<Object> joins,
       List<Map<String, Object>> datasets, List<Map<String, Object>> relationships,
-      Map<String, String> aliasToDataset, Set<String> seenNames) {
+      List<Map<String, Object>> complexJoins, Map<String, String> aliasToDataset,
+      Set<String> seenNames, Notices notices) {
     for (Object joinObj : joins) {
       Map<String, Object> join = asMap(joinObj);
       String child = requireStr(join, "name", "join");
@@ -264,8 +271,14 @@ final class MetricViewToOssie {
       childDs.put("source", childSource);
       datasets.add(childDs);
       aliasToDataset.put(child, child);
-      Map<String, Object> rel = convertJoin(join, parentName, parentAlias, child);
-      relationships.add(rel);
+      Map<String, Object> rel = convertJoin(join, parentName, parentAlias, child, notices);
+      // convertJoin omits from/to columns for a non-decomposable `on`; those entries have no valid
+      // Ossie relationship form, so they go to the model-level stash instead of `relationships`.
+      if (rel.containsKey("from_columns")) {
+        relationships.add(rel);
+      } else {
+        complexJoins.add(rel);
+      }
       // rely.at_most_one_match on a many_to_one join -> recover a unique_key on the child.
       Map<String, Object> rely = asMap(get(join, "rely"));
       List<String> toCols = strList(get(rel, "to_columns"));
@@ -276,7 +289,7 @@ final class MetricViewToOssie {
         childDs.put("unique_keys", uk);
       }
       walk(child, child, asList(get(join, "joins")), datasets, relationships,
-          aliasToDataset, seenNames);
+          complexJoins, aliasToDataset, seenNames, notices);
     }
   }
 
@@ -294,7 +307,8 @@ final class MetricViewToOssie {
   }
 
   private static Map<String, Object> convertJoin(
-      Map<String, Object> join, String parentName, String parentAlias, String child) {
+      Map<String, Object> join, String parentName, String parentAlias, String child,
+      Notices notices) {
     boolean hasUsing = get(join, "using") != null && !asList(get(join, "using")).isEmpty();
     boolean hasOn = str(get(join, "on")) != null && !str(get(join, "on")).isEmpty();
     if (!hasUsing && !hasOn) {
@@ -307,13 +321,16 @@ final class MetricViewToOssie {
     List<String> childCols = (List<String>) decomposed[1];
     String rawOn = (String) decomposed[2];
     if (rawOn != null) {
-      throw new ConversionException("Join '" + child + "' uses a non-equi or unsupported join "
-          + "condition ('on: " + rawOn + "') that an Apache Ossie relationship cannot represent. "
-          + "Apache Ossie joins are equi-joins of simple `alias.column` pairs (the fact side may "
-          + "be qualified with `source`, the source table name, or left bare). Cannot import.");
-    }
-    // Only fall back to `using` when there is no `on` to decompose (see decomposeOn: `on` wins).
-    if (!hasOn && hasUsing && parentCols.isEmpty()) {
+      // The `on` is not an equi-join of simple `alias.column` pairs (it has a non-equi operator, a
+      // SQL-function-wrapped key, or an extra filter predicate), so an Apache Ossie relationship
+      // cannot represent it (from/to columns are required). Rather than abort the whole
+      // conversion, warn here; the columns-less entry built below is stashed under the model's
+      // custom_extensions (complex_joins) so it round-trips, instead of an invalid relationship.
+      notices.warn("join '" + child + "'", "non-equi or unsupported join condition ('on: " + rawOn
+          + "') has no Apache Ossie relationship representation; preserved verbatim in the model's "
+          + "custom_extensions");
+    } else if (!hasOn && hasUsing && parentCols.isEmpty()) {
+      // Only fall back to `using` when there is no `on` to decompose (see decomposeOn: `on` wins).
       List<String> using = strList(get(join, "using"));
       parentCols = new ArrayList<>(using);
       childCols = new ArrayList<>(using);
@@ -324,27 +341,67 @@ final class MetricViewToOssie {
       cardinality = CARD_MANY_TO_ONE;
     }
     Map<String, Object> rel = new LinkedHashMap<>();
-    if (cardinality.toLowerCase(Locale.ROOT).equals(CARD_ONE_TO_MANY)) {
+    boolean childIsFrom = cardinality.toLowerCase(Locale.ROOT).equals(CARD_ONE_TO_MANY);
+    if (childIsFrom) {
       rel.put("name", child + "_to_" + parentName);
       rel.put("from", child);
       rel.put("to", parentName);
-      rel.put("from_columns", childCols);
-      rel.put("to_columns", parentCols);
     } else {
       rel.put("name", parentName + "_to_" + child);
       rel.put("from", parentName);
       rel.put("to", child);
-      rel.put("from_columns", parentCols);
-      rel.put("to_columns", childCols);
     }
+    if (rawOn != null) {
+      // An Apache Ossie relationship requires from/to columns, so a non-decomposable `on` has no
+      // valid relationship form. Return a columns-less entry carrying the raw clause and the
+      // MV-only join attributes (rely/cardinality) as flat keys; walk() routes it to the
+      // model-level DATABRICKS stash (complex_joins), and the reverse converter rebuilds it.
+      rel.put("on", rawOn);
+      for (String k : JOIN_STASH_KEYS) {
+        if (join.containsKey(k)) {
+          rel.put(k, join.get(k));
+        }
+      }
+      return rel;
+    }
+    rel.put("from_columns", childIsFrom ? childCols : parentCols);
+    rel.put("to_columns", childIsFrom ? parentCols : childCols);
     Map<String, Object> stash = new LinkedHashMap<>();
     for (String k : JOIN_STASH_KEYS) {
       if (join.containsKey(k)) {
         stash.put(k, join.get(k));
       }
     }
+    // Preserve the original `on` verbatim only when rebuilding it from the from/to columns would
+    // not reproduce it: a fact side qualified by the source table name rather than `source`, or an
+    // `on` over equal columns that rebuilds as `using`. For the canonical
+    // `source.<a> = <child>.<b>` form the rebuild is exact, so nothing is stashed. buildJoin
+    // restores a stashed `on` in preference to rebuilding from columns.
+    if (hasOn) {
+      String originalOn = str(get(join, "on"));
+      if (!originalOn.equals(rebuiltOn(parentAlias, child, parentCols, childCols))) {
+        stash.put("on", originalOn);
+      }
+    }
     writeStash(rel, stash);
     return rel;
+  }
+
+  /**
+   * The `on` clause the reverse converter (buildJoin) would rebuild from these equi-join columns,
+   * or {@code null} when it would instead emit `using` (equal column lists). Used to decide whether
+   * an equi-join's original `on` must be stashed to round-trip verbatim.
+   */
+  private static String rebuiltOn(
+      String parentAlias, String child, List<String> parentCols, List<String> childCols) {
+    if (parentCols.equals(childCols)) {
+      return null;
+    }
+    List<String> clauses = new ArrayList<>();
+    for (int i = 0; i < parentCols.size(); i++) {
+      clauses.add(parentAlias + "." + parentCols.get(i) + " = " + child + "." + childCols.get(i));
+    }
+    return String.join(" AND ", clauses);
   }
 
   /** Returns {parentCols, childCols, rawOn}; rawOn non-null means reject. */

@@ -45,6 +45,7 @@ import static org.apache.ossie.converter.databricks.OssieConverterCommon.strList
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.synonymsOf;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.truthy;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.validateSource;
+import static org.apache.ossie.converter.databricks.OssieConverterCommon.writeStash;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -172,6 +173,23 @@ final class OssieToMetricView {
     List<Map<String, Object>> metrics = schemaMapList(model, "metrics", modelScope);
 
     Map<String, Object> modelStash = readStash(model);
+    // A non-equi/filtered join has no schema-valid Ossie relationship (from/to columns are
+    // required), so MetricViewToOssie stashes it under the model's DATABRICKS custom_extensions
+    // (complex_joins) rather than emitting a stub relationship. Rebuild a columns-less
+    // relationship for each -- carrying its raw `on` (and rely/cardinality) in the stash that
+    // buildJoin restores from -- and merge them in so the join tree includes them.
+    for (Map<String, Object> pj : schemaMapList(modelStash, "complex_joins", modelScope)) {
+      Map<String, Object> rel = new LinkedHashMap<>();
+      rel.put("name", get(pj, "name"));
+      rel.put("from", get(pj, "from"));
+      rel.put("to", get(pj, "to"));
+      Map<String, Object> stash = new LinkedHashMap<>(pj);
+      stash.remove("name");
+      stash.remove("from");
+      stash.remove("to");
+      writeStash(rel, stash);
+      relationships.add(rel);
+    }
     String factHint = explicitSource != null ? explicitSource : str(get(modelStash, STASH_SOURCE_KEY));
     Object[] built = buildJoinTree(name, datasets, relationships, factHint, notices);
     Node root = (Node) built[0];
@@ -672,17 +690,25 @@ final class OssieToMetricView {
     Map<String, Object> stash = readStash(rel);
     List<String> fromCols = strList(get(rel, "from_columns"));
     List<String> toCols = strList(get(rel, "to_columns"));
-    validateJoinColumns(rel, fromCols, toCols);
-    List<String> parentCols = node.parentIsFrom ? fromCols : toCols;
-    List<String> childCols = node.parentIsFrom ? toCols : fromCols;
-    if (parentCols.equals(childCols)) {
-      join.put("using", new ArrayList<>(parentCols));
+    if (stash.containsKey("on")) {
+      // A non-equi/filtered `on` with no Ossie relationship representation was preserved verbatim
+      // in the DATABRICKS stash by MetricViewToOssie.convertJoin (the relationship carries no
+      // from/to columns). Restore it directly rather than rebuilding an `on` from columns.
+      join.put("on", stash.get("on"));
     } else {
-      List<String> clauses = new ArrayList<>();
-      for (int i = 0; i < parentCols.size(); i++) {
-        clauses.add(parentAlias + "." + parentCols.get(i) + " = " + alias + "." + childCols.get(i));
+      validateJoinColumns(rel, fromCols, toCols);
+      List<String> parentCols = node.parentIsFrom ? fromCols : toCols;
+      List<String> childCols = node.parentIsFrom ? toCols : fromCols;
+      if (parentCols.equals(childCols)) {
+        join.put("using", new ArrayList<>(parentCols));
+      } else {
+        List<String> clauses = new ArrayList<>();
+        for (int i = 0; i < parentCols.size(); i++) {
+          clauses.add(
+              parentAlias + "." + parentCols.get(i) + " = " + alias + "." + childCols.get(i));
+        }
+        join.put("on", String.join(" AND ", clauses));
       }
-      join.put("on", String.join(" AND ", clauses));
     }
     if (stash.containsKey("rely")) {
       join.put("rely", stash.get("rely"));
