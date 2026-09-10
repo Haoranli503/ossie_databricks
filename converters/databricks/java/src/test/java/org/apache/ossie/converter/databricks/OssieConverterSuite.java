@@ -1388,13 +1388,6 @@ public class OssieConverterSuite {
     assertInvalidOssieInput(
         ossieModelWithBody(
             "  custom_extensions:\n"
-            + "  - {vendor_name: DATABRICKS, data: '{}'}\n"
-            + "  - {vendor_name: DATABRICKS, data: '{\"filter\": \"region = 0\"}'}\n"
-            + validModelBody),
-        "at most one DATABRICKS custom_extensions entry is allowed");
-    assertInvalidOssieInput(
-        ossieModelWithBody(
-            "  custom_extensions:\n"
             + "  - {vendor_name: DATABRICKS, data: 123}\n"
             + validModelBody),
         "DATABRICKS custom_extensions data must be a string");
@@ -1421,6 +1414,29 @@ public class OssieConverterSuite {
       assertTrue(e.getReason().startsWith(
           "DATABRICKS custom_extensions data is not valid JSON:"), e.getReason());
     }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void duplicateDatabricksStashKeepsFirstAndWarns() {
+    // Two DATABRICKS custom_extensions entries on one object is malformed, but rather than fail we
+    // keep the first, ignore the rest, and warn so the dropped entry is not lost silently.
+    String osi = ossieModelWithBody(
+        "  custom_extensions:\n"
+        + "  - {vendor_name: DATABRICKS, data: '{\"filter\": \"a = 1\"}'}\n"
+        + "  - {vendor_name: DATABRICKS, data: '{\"filter\": \"b = 2\"}'}\n"
+        + "  datasets:\n"
+        + "  - name: d\n"
+        + "    source: c.s.t\n"
+        + "    fields:\n"
+        + "    - {name: id, expression: {dialects: [{dialect: DATABRICKS, expression: id}]}}\n");
+    OssieConverter.Result result = OssieConverter.convertOssieToMetricView(osi, null);
+    Map<String, Object> view = (Map<String, Object>) OssieConverter.parseYaml(result.yaml);
+    assertEquals("a = 1", view.get("filter"), "the first DATABRICKS entry must win");
+    assertTrue(
+        result.notices.stream().anyMatch(n ->
+            n.contains("more than one DATABRICKS custom_extensions entry")),
+        result.notices.toString());
   }
 
   @Test

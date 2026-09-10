@@ -172,7 +172,7 @@ final class OssieToMetricView {
     List<Map<String, Object>> relationships = schemaMapList(model, "relationships", modelScope);
     List<Map<String, Object>> metrics = schemaMapList(model, "metrics", modelScope);
 
-    Map<String, Object> modelStash = readStash(model);
+    Map<String, Object> modelStash = readStash(model, notices, modelScope);
     // A non-equi/filtered join has no schema-valid Ossie relationship (from/to columns are
     // required), so MetricViewToOssie stashes it under the model's DATABRICKS custom_extensions
     // (complex_joins) rather than emitting a stub relationship. Rebuild a columns-less
@@ -212,7 +212,7 @@ final class OssieToMetricView {
 
     List<Object> joins = new ArrayList<>();
     for (Node child : root.children) {
-      joins.add(buildJoin(child, "source", datasets));
+      joins.add(buildJoin(child, "source", datasets, notices));
     }
     if (!joins.isEmpty()) {
       view.put("joins", joins);
@@ -710,14 +710,14 @@ final class OssieToMetricView {
   }
 
   private static Map<String, Object> buildJoin(Node node, String parentAlias,
-      Map<String, Map<String, Object>> datasets) {
+      Map<String, Map<String, Object>> datasets, Notices notices) {
     Map<String, Object> rel = node.rel;
     String alias = node.alias;
     Map<String, Object> join = new LinkedHashMap<>();
     join.put("name", alias);
     join.put("source", validateSource(get(datasets.get(node.dataset), "source"), node.dataset));
 
-    Map<String, Object> stash = readStash(rel);
+    Map<String, Object> stash = readStash(rel, notices, "join '" + alias + "'");
     List<String> fromCols = strList(get(rel, "from_columns"));
     List<String> toCols = strList(get(rel, "to_columns"));
     if (stash.containsKey("on")) {
@@ -754,7 +754,7 @@ final class OssieToMetricView {
     }
     List<Object> nested = new ArrayList<>();
     for (Node c : node.children) {
-      nested.add(buildJoin(c, alias, datasets));
+      nested.add(buildJoin(c, alias, datasets, notices));
     }
     if (!nested.isEmpty()) {
       join.put("joins", nested);
@@ -859,7 +859,7 @@ final class OssieToMetricView {
     if (!syns.isEmpty()) {
       dim.put("synonyms", truncateSynonyms(syns, scope, notices));
     }
-    Map<String, Object> stash = readStash(field);
+    Map<String, Object> stash = readStash(field, notices, scope);
     if (stash.containsKey("format")) {
       dim.put("format", stash.get("format"));
     }
@@ -914,7 +914,7 @@ final class OssieToMetricView {
     if (!syns.isEmpty()) {
       measure.put("synonyms", truncateSynonyms(syns, scope, notices));
     }
-    Map<String, Object> stash = readStash(metric);
+    Map<String, Object> stash = readStash(metric, notices, scope);
     if (stash.containsKey("format")) {
       measure.put("format", stash.get("format"));
     }

@@ -547,13 +547,17 @@ final class OssieConverterCommon {
     return extensions;
   }
 
-  static Map<String, Object> readStash(Map<String, Object> obj) {
+  static Map<String, Object> readStash(
+      Map<String, Object> obj, OssieConverter.Notices notices, String scope) {
     Map<String, Object> stash = null;
+    boolean sawExtra = false;
     for (Map<String, Object> ext : customExtensions(obj)) {
       if (VENDOR.equals(str(get(ext, "vendor_name")))) {
         if (stash != null) {
-          String reason = "at most one DATABRICKS custom_extensions entry is allowed";
-          throw ConversionException.invalidInput(reason, reason);
+          // First-wins: keep the first DATABRICKS entry and ignore later ones, but warn so a
+          // dropped entry is not lost silently.
+          sawExtra = true;
+          continue;
         }
         // A null or empty-string `data` is treated as an empty object rather than a parse error.
         Object dataValue = get(ext, "data");
@@ -579,6 +583,10 @@ final class OssieConverterCommon {
         stash = (Map<String, Object>) parsedValue;
         stash.remove("_v");
       }
+    }
+    if (sawExtra) {
+      notices.warn(scope, "found more than one DATABRICKS custom_extensions entry; "
+          + "using the first and ignoring the rest");
     }
     return stash != null ? stash : new LinkedHashMap<>();
   }
