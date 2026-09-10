@@ -512,6 +512,17 @@ public class OssieConverterSuite {
         OssieConverter.convertMetricViewToOssie(mv, null).yaml);
   }
 
+  /** A Metric View YAML with {@code joinCount} sibling equi-joins on the fact source. */
+  private static String metricViewWithJoins(int joinCount) {
+    StringBuilder mv = new StringBuilder("version: '1.1'\nsource: c.s.fact\njoins:\n");
+    for (int i = 1; i <= joinCount; i++) {
+      mv.append("- name: j").append(i).append("\n")
+          .append("  source: c.s.j").append(i).append("\n")
+          .append("  on: source.k = j").append(i).append(".k\n");
+    }
+    return mv.toString();
+  }
+
   @Test
   @SuppressWarnings("unchecked")
   public void importDecomposesJoinIntoRelationship() {
@@ -537,6 +548,32 @@ public class OssieConverterSuite {
     assertEquals("customer", rel.get("to"));
     assertEquals(List.of("o_custkey"), rel.get("from_columns"));
     assertEquals(List.of("c_custkey"), rel.get("to_columns"));
+  }
+
+  @Test
+  public void exportRejectsMoreJoinsThanImportCanRebuild() {
+    // MV -> Ossie has no join bound of its own, but Ossie -> MV rejects a model with more than
+    // MAX_JOIN_NODES datasets. Without a matching bound here, a Metric View with too many joins
+    // would export to a model that could never be imported again; reject it at export instead.
+    int max = OssieConverterCommon.MAX_JOIN_NODES;
+    String mv = metricViewWithJoins(max);
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertMetricViewToOssie(mv, null));
+    assertTrue(e.getMessage().contains("at most " + max + " are supported"),
+        "expected a join-count rejection, got: " + e.getMessage());
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void exportAtTheJoinLimitStillSucceeds() {
+    // The fact plus (MAX_JOIN_NODES - 1) joins is exactly MAX_JOIN_NODES datasets, the boundary the
+    // reverse conversion accepts, so export must still succeed here.
+    int max = OssieConverterCommon.MAX_JOIN_NODES;
+    Map<String, Object> out = (Map<String, Object>) importMv(metricViewWithJoins(max - 1));
+    List<Object> models = (List<Object>) out.get("semantic_model");
+    Map<String, Object> model = (Map<String, Object>) models.get(0);
+    List<Object> datasets = (List<Object>) model.get("datasets");
+    assertEquals(max, datasets.size(), "fact plus joins should be exactly the limit");
   }
 
   @Test

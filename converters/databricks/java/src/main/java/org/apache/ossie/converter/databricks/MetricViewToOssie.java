@@ -21,6 +21,7 @@ import static org.apache.ossie.converter.databricks.OssieConverterCommon.CARD_MA
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.CARD_ONE_TO_MANY;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.DIALECT_DATABRICKS;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.MAPPER;
+import static org.apache.ossie.converter.databricks.OssieConverterCommon.MAX_JOIN_NODES;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.MV_VERSION;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.OSSIE_VERSION;
 import static org.apache.ossie.converter.databricks.OssieConverterCommon.SELECT_WITH_RE;
@@ -172,6 +173,14 @@ final class MetricViewToOssie {
 
     walk(factName, "source", asList(get(view, "joins")), datasets, relationships,
         complexJoins, aliasToDataset, seenNames, notices);
+
+    // The reverse conversion bounds how many datasets it will build (see buildJoinTree), so a
+    // Metric View that expands past that bound could not be imported again. Reject it here to keep
+    // MV -> Ossie -> MV symmetric rather than emitting a model that fails on the way back in.
+    if (datasets.size() > MAX_JOIN_NODES) {
+      throw new ConversionException("Metric View '" + factName + "' has " + datasets.size()
+          + " datasets; at most " + MAX_JOIN_NODES + " are supported.");
+    }
 
     // `fields` is a v1.1 alias for `dimensions`: an empty `dimensions: []` falls through to
     // `fields`, and the "both set" warning fires only when BOTH are non-empty (not merely
