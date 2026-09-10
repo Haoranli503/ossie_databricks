@@ -268,9 +268,17 @@ final class OssieToMetricView {
     Pattern factQualifier = Pattern.compile("\\b" + Pattern.quote(fact) + "\\.");
     // Likewise fixed once the join tree is walked: one alternation over the joined dataset names.
     Pattern datasetHead = qualifierChainPattern(datasetAliasPath.keySet());
+    // Datasets reached by more than one join path (a diamond). A measure names a dataset, so a
+    // bare reference to one of these cannot be unambiguously qualified (see convertMetric).
+    Set<String> diamondDatasets = new HashSet<>();
+    for (String joined : datasetAliasPath.keySet()) {
+      if (counts.getOrDefault(joined, 1) > 1) {
+        diamondDatasets.add(joined);
+      }
+    }
     for (Map<String, Object> metric : metrics) {
-      Map<String, Object> measure =
-          convertMetric(metric, factQualifier, datasetHead, datasetAliasPath, seenDims, notices);
+      Map<String, Object> measure = convertMetric(
+          metric, factQualifier, datasetHead, datasetAliasPath, diamondDatasets, seenDims, notices);
       if (measure == null) {
         droppedMeasures.add(str(get(metric, "name")));
         continue;
@@ -652,6 +660,28 @@ final class OssieToMetricView {
     return rewriteQualifiers(expr, datasetHead, datasetAliasPath::get);
   }
 
+  /**
+   * The first dataset a diamond reference names in {@code expr}, or null if none. A measure
+   * addresses a dataset by name, so a bare reference to a dataset reached by more than one join
+   * path cannot be unambiguously qualified. Reuses the literal-blind qualifier matcher so a string
+   * literal that merely looks like a reference is not mistaken for one; the run is left unchanged
+   * (the resolver returns null) since this pass only detects.
+   */
+  private static String firstDiamondReference(
+      String expr, Pattern datasetHead, Set<String> diamondDatasets) {
+    if (datasetHead == null || diamondDatasets.isEmpty()) {
+      return null;
+    }
+    String[] found = {null};
+    rewriteQualifiers(expr, datasetHead, leaf -> {
+      if (found[0] == null && diamondDatasets.contains(leaf)) {
+        found[0] = leaf;
+      }
+      return null;
+    });
+    return found[0];
+  }
+
   /** Sorted so the error message is deterministic (the dropped-name sets are unordered). */
   private static String sortedNames(Set<String> names) {
     List<String> sorted = new ArrayList<>();
@@ -842,6 +872,7 @@ final class OssieToMetricView {
       Pattern factQualifier,
       Pattern datasetHead,
       Map<String, String> datasetAliasPath,
+      Set<String> diamondDatasets,
       Set<String> seenNames,
       Notices notices) {
     String name = requireStr(metric, "name", "metric");
@@ -853,6 +884,12 @@ final class OssieToMetricView {
     String expr = pickExpression(get(metric, "expression"), scope);
     if (expr == null) {
       notices.warn(scope, "no DATABRICKS/ANSI_SQL dialect; dropping metric");
+      return null;
+    }
+    String diamond = firstDiamondReference(expr, datasetHead, diamondDatasets);
+    if (diamond != null) {
+      notices.warn(scope, "expression references dataset '" + diamond + "', reached by more "
+          + "than one join path (diamond); cannot be unambiguously qualified; dropped");
       return null;
     }
     // Re-qualify a joined dataset's columns with the alias path that addresses them from the

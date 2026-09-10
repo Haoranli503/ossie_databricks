@@ -345,6 +345,48 @@ public class OssieConverterSuite {
 
   @Test
   @SuppressWarnings("unchecked")
+  public void measureNamingADiamondDatasetIsDroppedWithNotice() {
+    // Same diamond as above (`d` reached via `a -> b -> d` and `a -> c -> d`), plus a measure that
+    // names `d` by its bare dataset name. A measure addresses a dataset by name, so it cannot be
+    // split per fan-out path the way the dimension on `d` is; it is dropped with a notice rather
+    // than silently bound to one arbitrary branch (as the dimension complex-expression path does).
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "semantic_model:\n"
+        + "- name: m\n"
+        + "  datasets:\n"
+        + "  - name: a\n"
+        + "    source: c.s.a\n"
+        + "  - name: b\n"
+        + "    source: c.s.b\n"
+        + "  - name: c\n"
+        + "    source: c.s.c\n"
+        + "  - name: d\n"
+        + "    source: c.s.d\n"
+        + "    fields:\n"
+        + "    - {name: dcol, expression: {dialects: [{dialect: DATABRICKS, expression: dcol}]}}\n"
+        + "  relationships:\n"
+        + "  - {name: ab, from: a, to: b, from_columns: [k], to_columns: [k]}\n"
+        + "  - {name: ac, from: a, to: c, from_columns: [k], to_columns: [k]}\n"
+        + "  - {name: bd, from: b, to: d, from_columns: [k], to_columns: [k]}\n"
+        + "  - {name: cd, from: c, to: d, from_columns: [k], to_columns: [k]}\n"
+        + "  metrics:\n"
+        + "  - {name: dsum, expression: {dialects: [{dialect: DATABRICKS, expression: SUM(d.dcol)}]}}\n";
+    OssieConverter.Result result = OssieConverter.convertOssieToMetricView(osi, "a");
+    Map<String, Object> view = (Map<String, Object>) OssieConverter.parseYaml(result.yaml);
+    // The diamond dimension on `d` still fans out to one dimension per path.
+    assertEquals(2, ((List<Object>) view.get("dimensions")).size());
+    // The measure that names `d` is dropped rather than bound to an arbitrary branch.
+    assertFalse(view.containsKey("measures"),
+        "a measure naming a diamond dataset must be dropped, got: " + view.get("measures"));
+    String expected = "expression references dataset 'd', reached by more than one join path "
+        + "(diamond); cannot be unambiguously qualified; dropped";
+    assertTrue(result.notices.stream().anyMatch(n -> n.contains(expected)),
+        result.notices.toString());
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
   public void nestedJoinColumnInMeasureGetsFullAliasPath() {
     // orders -> customer -> nation: `nation` nests under `customer`, so its columns are addressed
     // as `customer.nation.col`. A bare `nation.` head would be read as struct access on a
