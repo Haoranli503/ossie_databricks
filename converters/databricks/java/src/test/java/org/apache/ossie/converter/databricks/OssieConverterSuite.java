@@ -1188,6 +1188,41 @@ public class OssieConverterSuite {
   }
 
   @Test
+  @SuppressWarnings("unchecked")
+  public void cascadeDropMatchesADroppedNameCaseInsensitively() {
+    // Databricks SQL identifiers are case-insensitive. A metric that references a dropped field in a
+    // different case (COUNT(DISTINCT REGION_NAME) over a dropped region_name) must cascade-drop
+    // rather than survive as a dangling reference.
+    String osi =
+        "version: \"0.2.0.dev0\"\n"
+        + "semantic_model:\n"
+        + "  - name: m\n"
+        + "    datasets:\n"
+        + "      - name: d\n"
+        + "        source: cat.sch.t\n"
+        + "        fields:\n"
+        + "          - name: id\n"
+        + "            expression:\n"
+        + "              dialects: [{dialect: DATABRICKS, expression: id}]\n"
+        + "          - name: region_name\n"
+        + "            expression:\n"
+        + "              dialects: [{dialect: T_SQL, expression: region_name}]\n"
+        + "    metrics:\n"
+        + "      - name: region_count\n"
+        + "        expression:\n"
+        + "          dialects: [{dialect: DATABRICKS, expression: COUNT(DISTINCT REGION_NAME)}]\n";
+    OssieConverter.Result result = OssieConverter.convertOssieToMetricView(osi, null);
+    Map<String, Object> view = (Map<String, Object>) OssieConverter.parseYaml(result.yaml);
+    // The measure references the dropped field in upper case, so it is cascade-dropped.
+    assertFalse(view.containsKey("measures"),
+        "region_count must cascade-drop, got: " + view.get("measures"));
+    // The unrelated dimension survives.
+    assertEquals(1, ((List<Object>) view.get("dimensions")).size());
+    assertTrue(result.notices.contains(cascadeNotice("measure", "region_count", "region_name")),
+        result.notices.toString());
+  }
+
+  @Test
   public void stashPreservesABackslashBeforeAUnicodeEscape() {
     // The stash lowercases the hex of Jackson's \\uXXXX escapes. That rewrite must re-emit any
     // escaped-backslash run in front of the escape verbatim; it used to halve it, so a value

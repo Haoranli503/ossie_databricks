@@ -1069,7 +1069,8 @@ final class OssieToMetricView {
         return false;
       }
       String expr = (String) column.get("expr");
-      return expr.contains(reference) && findOutsideLiterals(expr, pattern);
+      return expr.toLowerCase(Locale.ROOT).contains(reference.toLowerCase(Locale.ROOT))
+          && findOutsideLiterals(expr, pattern);
     }
 
     private void schedule(int index, boolean measure, int phase, int sourceIndex) {
@@ -1088,14 +1089,18 @@ final class OssieToMetricView {
     }
 
     private String referencesDropped(String expr, String selfName) {
+      // Databricks SQL identifiers are case-insensitive, so match a dropped name against the
+      // expression case-insensitively: both the pre-filter here and the regex in referencePattern.
+      String lowerExpr = expr.toLowerCase(Locale.ROOT);
       for (String name : droppedMeasures) {
-        if (name != null && expr.contains(name)
+        if (name != null && lowerExpr.contains(name.toLowerCase(Locale.ROOT))
             && findOutsideLiterals(expr, referencePattern(name, true))) {
           return name;
         }
       }
       for (String name : droppedDims) {
-        if (name != null && !name.equals(selfName) && expr.contains(name)
+        if (name != null && !name.equals(selfName)
+            && lowerExpr.contains(name.toLowerCase(Locale.ROOT))
             && findOutsideLiterals(expr, referencePattern(name, false))) {
           return name;
         }
@@ -1105,9 +1110,10 @@ final class OssieToMetricView {
 
     private Pattern referencePattern(String name, boolean measure) {
       Map<String, Pattern> patterns = measure ? measurePatterns : dimensionPatterns;
-      return patterns.computeIfAbsent(name, ignored -> measure
-          ? Pattern.compile("measure\\(\\s*" + Pattern.quote(name) + "\\s*\\)")
-          : Pattern.compile("(?<![\\w.])" + Pattern.quote(name) + "(?![\\w.])"));
+      return patterns.computeIfAbsent(name, ignored -> Pattern.compile(measure
+          ? "measure\\(\\s*" + Pattern.quote(name) + "\\s*\\)"
+          : "(?<![\\w.])" + Pattern.quote(name) + "(?![\\w.])",
+          Pattern.CASE_INSENSITIVE));
     }
 
     private static void retainSurvivors(
