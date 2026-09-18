@@ -31,7 +31,6 @@ from ossie import (
     OssieField,
     OssieMetric,
     OssieRelationship,
-    OssieSemanticModel,
 )
 from ossie_dbt.converter_issues import ConverterIssue, ConverterIssueType, ConverterResult
 from ossie_dbt.filter_utils import _collect_filter_sql, _merge_filter_sqls
@@ -122,15 +121,10 @@ class MSIToOssieConverter:
         return ConverterResult(
             output=OssieDocument(
                 version="0.2.0.dev0",
-                dialects=[self._dialect],
-                semantic_model=[
-                    OssieSemanticModel(
-                        name=ossie_model_name,
-                        datasets=datasets,
-                        relationships=relationships if relationships else None,
-                        metrics=ossie_metrics if ossie_metrics else None,
-                    )
-                ],
+                name=ossie_model_name,
+                datasets=datasets,
+                relationships=relationships if relationships else None,
+                metrics=ossie_metrics if ossie_metrics else None,
             ),
             issues=issues,
         )
@@ -391,18 +385,27 @@ class MSIToOssieConverter:
             return _RelationshipDirection(from_dataset=ds_a, to_dataset=ds_b, from_col=col_a, to_col=col_b)
         return _RelationshipDirection(from_dataset=ds_b, to_dataset=ds_a, from_col=col_b, to_col=col_a)
 
+    _ONE_SIDE_ENTITY_TYPES = {EntityType.PRIMARY, EntityType.UNIQUE}
+
     @staticmethod
     def _build_relationships(
         entity_index: Dict[str, List[_EntityEntry]],
     ) -> List[OssieRelationship]:
         """Resolve implicit MSI entity links into explicit Ossie relationships.
 
-        Every pair of datasets sharing an entity name is a valid join path.
+        Every pair of datasets sharing an entity name is a candidate join path, except when
+        both sides declare that entity as FOREIGN: `to_columns` must be a primary/unique key
+        of the `to` dataset (per the Ossie spec), which no FOREIGN-side column is.
         """
         relationships: List[OssieRelationship] = []
         for entity_name, entries in entity_index.items():
             for entry_a, entry_b in combinations(entries, 2):
                 if entry_a.dataset == entry_b.dataset:
+                    continue
+                if (
+                    entry_a.entity_type not in MSIToOssieConverter._ONE_SIDE_ENTITY_TYPES
+                    and entry_b.entity_type not in MSIToOssieConverter._ONE_SIDE_ENTITY_TYPES
+                ):
                     continue
                 direction = MSIToOssieConverter._relationship_direction(
                     entry_a.dataset,

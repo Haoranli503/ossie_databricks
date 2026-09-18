@@ -101,10 +101,9 @@ class OssieToMSIConverter:
         semantic_models: List[PydanticSemanticModel] = []
         metrics: List[PydanticMetric] = []
 
-        for ossie_sm in document.semantic_model:
-            for dataset in ossie_sm.datasets:
-                semantic_models.append(self._convert_dataset(dataset, ossie_sm))
-            metrics.extend(self._convert_metrics(ossie_sm))
+        for dataset in document.datasets:
+            semantic_models.append(self._convert_dataset(dataset, document))
+        metrics.extend(self._convert_metrics(document))
 
         return ConverterResult(
             output=PydanticSemanticManifest(
@@ -154,6 +153,17 @@ class OssieToMSIConverter:
     @staticmethod
     def _build_key_sets(dataset: OssieDataset, ossie_sm: OssieSemanticModel) -> _KeySets:
         """Return a _KeySets with primary, unique, and foreign key column sets for a dataset."""
+        for key_type, keys in (
+            ("primary key", [dataset.primary_key] if dataset.primary_key else []),
+            ("unique key", dataset.unique_keys or []),
+        ):
+            for key in keys:
+                if len(key) > 1:
+                    raise ValueError(
+                        f"Dataset {dataset.name!r} has composite {key_type} {key!r}; "
+                        "MetricFlow entities cannot represent composite keys losslessly"
+                    )
+
         return _KeySets(
             primary=set(dataset.primary_key or []),
             unique={col for keys in (dataset.unique_keys or []) for col in keys},
@@ -282,9 +292,16 @@ class OssieToMSIConverter:
         # --- SIMPLE: single aggregation ---
         agg_result = _extract_agg_info(expr_str)
         if agg_result is not None:
-            agg, col, percentile = agg_result
+            agg, col, percentile, use_discrete = agg_result
             semantic_model_name = self._find_dataset_for_col(expr_str, col, datasets)
-            agg_params = PydanticMeasureAggregationParameters(percentile=percentile) if percentile is not None else None
+            agg_params = (
+                PydanticMeasureAggregationParameters(
+                    percentile=percentile,
+                    use_discrete_percentile=use_discrete,
+                )
+                if percentile is not None
+                else None
+            )
             return [
                 PydanticMetric(
                     name=name,

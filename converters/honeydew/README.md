@@ -17,9 +17,17 @@
   under the License.
 -->
 
-# Ossie ↔ Honeydew Converter
+# Apache Ossie ↔ Honeydew Converter
 
-Bidirectional converter between [Ossie](../../core-spec/spec.md) semantic models and [Honeydew](https://honeydew.ai/docs) workspace YAML.
+Bidirectional converter between [Apache Ossie](../../core-spec/spec.md) semantic models
+and [Honeydew](https://honeydew.ai/docs) [workspace YAML](https://honeydew.ai/docs/yaml-schema).
+
+Honeydew documents this integration from its own side under
+[Apache Ossie (OSI)](https://honeydew.ai/docs/integration/apache-ossie-osi).
+
+Ossie documents contain one model directly at the root, with `version`, `name`,
+`datasets`, and optional model properties. Legacy `semantic_model` wrappers
+(arrays or objects) are rejected.
 
 ## Overview
 
@@ -32,7 +40,7 @@ Bidirectional converter between [Ossie](../../core-spec/spec.md) semantic models
 
 | Ossie concept | Honeydew concept |
 |-------------|-----------------|
-| `semantic_model.name` | `workspace.yml name` |
+| `name` | `workspace.yml name` |
 | `dataset` | Entity + dataset files under `schema/<entity>/` |
 | `dataset.source` | `dataset.sql` |
 | `dataset.primary_key` | `entity.keys` |
@@ -46,7 +54,7 @@ Bidirectional converter between [Ossie](../../core-spec/spec.md) semantic models
 
 | Honeydew concept | Ossie concept |
 |-----------------|-------------|
-| `workspace.name` | `semantic_model.name` |
+| `workspace.name` | `name` |
 | Entity + primary dataset | `dataset` |
 | `entity.keys` | `dataset.primary_key` (and `dataset.unique_keys`) |
 | `dataset.attributes` (columns) | `fields` with `ANSI_SQL` expression = column name |
@@ -70,10 +78,10 @@ uv sync
 
 ```bash
 # Ossie YAML → Honeydew workspace directory
-uv run honeydew-ossie ossie-to-honeydew -i input.yaml -o output_dir/
+uv run ossie-honeydew ossie-to-honeydew -i input.yaml -o output_dir/
 
 # Honeydew workspace directory → Ossie YAML
-uv run honeydew-ossie honeydew-to-ossie -i workspace_dir/ -o output.yaml
+uv run ossie-honeydew honeydew-to-ossie -i workspace_dir/ -o output.yaml
 ```
 
 ## Tests
