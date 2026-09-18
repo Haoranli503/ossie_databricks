@@ -122,9 +122,7 @@ final class MetricViewToOssie {
     Map<String, Object> model = convertView(view, modelName, notices);
     Map<String, Object> out = new LinkedHashMap<>();
     out.put("version", OSSIE_VERSION);
-    List<Object> models = new ArrayList<>();
-    models.add(model);
-    out.put("semantic_model", models);
+    out.putAll(model);
     return serializeOssie(out, notices);
   }
 

@@ -39,15 +39,14 @@ public class OssieDatabricksConverterCliSuite {
 
   private static final String OSSIE_MODEL =
       "version: \"0.2.0.dev0\"\n"
-      + "semantic_model:\n"
-      + "  - name: sales\n"
-      + "    datasets:\n"
-      + "      - name: orders\n"
-      + "        source: cat.sch.orders\n"
-      + "        fields:\n"
-      + "          - name: o_status\n"
-      + "            expression:\n"
-      + "              dialects: [{dialect: DATABRICKS, expression: o_orderstatus}]\n";
+      + "name: sales\n"
+      + "datasets:\n"
+      + "  - name: orders\n"
+      + "    source: cat.sch.orders\n"
+      + "    fields:\n"
+      + "      - name: o_status\n"
+      + "        expression:\n"
+      + "          dialects: [{dialect: DATABRICKS, expression: o_orderstatus}]\n";
 
   private static final String METRIC_VIEW =
       "version: '1.1'\n"
@@ -92,7 +91,7 @@ public class OssieDatabricksConverterCliSuite {
   @Test
   public void importConvertsAMetricViewToAnOssieModel() throws IOException {
     String out = stdout("import", write("view.yaml", METRIC_VIEW).toString());
-    assertTrue(out.contains("semantic_model"), "expected an Apache Ossie model, got:\n" + out);
+    assertTrue(out.contains("datasets:"), "expected an Apache Ossie model, got:\n" + out);
     assertTrue(out.contains("0.2.0.dev0"), "expected the Apache Ossie version, got:\n" + out);
   }
 

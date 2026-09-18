@@ -409,9 +409,7 @@ public class OssieConverterRoundTripSuite {
     }
     Map<String, Object> out = new LinkedHashMap<>();
     out.put("version", OssieConverter.OSSIE_VERSION);
-    List<Object> models = new ArrayList<>();
-    models.add(model);
-    out.put("semantic_model", models);
+    out.putAll(model);
     return out;
   }
 
@@ -547,8 +545,8 @@ public class OssieConverterRoundTripSuite {
         asMap(OssieConverter.parseYaml(OssieConverter.convertMetricViewToOssie(mvYaml, null).yaml));
 
     String ctx = " (seed " + seed + ")";
-    Map<String, Object> m1 = asMap(asList(ossie.get("semantic_model")).get(0));
-    Map<String, Object> m2 = asMap(asList(ossie2.get("semantic_model")).get(0));
+    Map<String, Object> m1 = ossie;
+    Map<String, Object> m2 = ossie2;
 
     Map<String, String> d1 = new LinkedHashMap<>();
     for (Object dsObj : asList(m1.get("datasets"))) {

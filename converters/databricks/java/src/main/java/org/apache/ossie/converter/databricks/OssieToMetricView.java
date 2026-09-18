@@ -128,20 +128,20 @@ final class OssieToMetricView {
           "Unsupported Apache Ossie version '" + version + "'. Supported: " + OSSIE_VERSION,
           version);
     }
-    List<Object> models = schemaList(root, "semantic_model", "Apache Ossie YAML");
-    if (models.isEmpty()) {
-      throw ConversionException.invalidInput(
-          "'semantic_model' must be a non-empty list",
-          "its 'semantic_model' must be a non-empty list");
-    }
-    if (!(models.get(0) instanceof Map)) {
-      String reason = "Apache Ossie YAML: 'semantic_model[0]' must be a mapping";
+    if (root.containsKey("semantic_model")) {
+      String reason = "Legacy 'semantic_model' wrappers are not supported; place the model "
+          + "properties directly at the document root";
       throw ConversionException.invalidInput(reason, reason);
     }
-    if (models.size() > 1) {
-      notices.warn("model", "multiple semantic models found; converting only the first");
+    if (root.containsKey("dialects") || root.containsKey("vendors")) {
+      String reason = "Root 'dialects' and 'vendors' are not supported by the Apache Ossie spec";
+      throw ConversionException.invalidInput(reason, reason);
     }
-    Map<String, Object> view = convertModel((Map<String, Object>) models.get(0), source, notices);
+    if (!(get(root, "name") instanceof String)) {
+      String reason = "Apache Ossie model requires a string 'name' at the document root";
+      throw ConversionException.invalidInput(reason, reason);
+    }
+    Map<String, Object> view = convertModel(root, source, notices);
     try {
       return new Result(MAPPER.writeValueAsString(view), notices.toList());
     } catch (Exception e) {
