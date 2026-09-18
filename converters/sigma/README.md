@@ -82,7 +82,7 @@ Path("data_model.json").write_text(json.dumps(result.output, indent=2))
 
 | Sigma concept | Ossie concept | Notes |
 |---|---|---|
-| Data model (`name`, `description`) | `OssieSemanticModel` | `dataModelId`, `folderId`, `documentVersion`, `schemaVersion`, `createdAt`, `createdBy`, `updatedAt`, `updatedBy`, `ownerId`, `url` preserved in `custom_extensions` and written back on export |
+| Data model (`name`, `description`) | `OssieDocument` root | `dataModelId`, `folderId`, `documentVersion`, `schemaVersion`, `createdAt`, `createdBy`, `updatedAt`, `updatedBy`, `ownerId`, `url` preserved in `custom_extensions` and written back on export |
 | Page | *(none)* | Ossie has no page/folder-of-elements concept, but `pages` is a required part of the spec, so page membership is preserved per-dataset in `custom_extensions` and rebuilt on export |
 | Element (`kind: table`) | `OssieDataset` | `source` = warehouse path joined with `.` for `warehouse-table`; the other five source kinds get a marker plus the native `source` block in `custom_extensions` |
 | Element (any other `kind`) | *not modeled* | Preserved verbatim in a model-level `custom_extensions` entry so `ossie-to-sigma` restores it unchanged |
