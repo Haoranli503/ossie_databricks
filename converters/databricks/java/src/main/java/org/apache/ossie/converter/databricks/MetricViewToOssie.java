@@ -145,7 +145,7 @@ final class MetricViewToOssie {
     boolean isSql = SELECT_WITH_RE.matcher(source.toString().trim()).find();
     String lastId = lastIdentifier(source);
     String factName;
-    if (modelName != null) {
+    if (modelName != null && !modelName.isEmpty()) {
       factName = modelName;
     } else if (!isSql && lastId != null && isSimpleIdentifier(lastId)) {
       factName = lastId;

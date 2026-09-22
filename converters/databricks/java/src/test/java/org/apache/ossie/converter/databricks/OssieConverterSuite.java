@@ -529,6 +529,24 @@ public class OssieConverterSuite {
         OssieConverter.convertMetricViewToOssie(mv, null).yaml);
   }
 
+  @Test
+  public void emptyModelNameFallsBackLikeAbsent() {
+    // An empty --name (e.g. an unset shell variable) must be treated as absent and fall back to
+    // deriving the model name from the source's last identifier, not taken as a literal name: "".
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "dimensions:\n"
+        + "- name: amount\n"
+        + "  expr: amount\n"
+        + "measures:\n"
+        + "- name: n\n"
+        + "  expr: COUNT(*)\n";
+    assertEquals(
+        OssieConverter.convertMetricViewToOssie(mv, null).yaml,
+        OssieConverter.convertMetricViewToOssie(mv, "").yaml);
+  }
+
   /** A Metric View YAML with {@code joinCount} sibling equi-joins on the fact source. */
   private static String metricViewWithJoins(int joinCount) {
     StringBuilder mv = new StringBuilder("version: '1.1'\nsource: c.s.fact\njoins:\n");
