@@ -190,7 +190,8 @@ final class OssieToMetricView {
       writeStash(rel, stash);
       relationships.add(rel);
     }
-    String factHint = explicitSource != null ? explicitSource : str(get(modelStash, STASH_SOURCE_KEY));
+    String factHint = explicitSource != null && !explicitSource.isEmpty()
+        ? explicitSource : str(get(modelStash, STASH_SOURCE_KEY));
     Object[] built = buildJoinTree(name, datasets, relationships, factHint, notices);
     Node root = (Node) built[0];
     String fact = (String) built[1];

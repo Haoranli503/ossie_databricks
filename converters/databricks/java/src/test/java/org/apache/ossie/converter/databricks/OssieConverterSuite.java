@@ -498,6 +498,30 @@ public class OssieConverterSuite {
     assertTrue(r.notices.stream().anyMatch(m -> m.contains("foreign-vendor custom_extensions dropped")));
   }
 
+  @Test
+  public void emptyExplicitSourceFallsBackLikeAbsent() {
+    // An empty --source (e.g. an unset shell variable) must be treated as absent and fall back to
+    // the fact heuristic, not taken as a real override (which would fail as "requested source ''
+    // is not a dataset").
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "name: m\n"
+        + "datasets:\n"
+        + "- name: orders\n"
+        + "  source: c.s.orders\n"
+        + "  fields:\n"
+        + "  - {name: amount, expression: {dialects: [{dialect: DATABRICKS, expression: amount}]}}\n"
+        + "- name: customer\n"
+        + "  source: c.s.customer\n"
+        + "  fields:\n"
+        + "  - {name: c_name, expression: {dialects: [{dialect: DATABRICKS, expression: c_name}]}}\n"
+        + "relationships:\n"
+        + "- {name: oc, from: orders, to: customer, from_columns: [c_custkey], to_columns: [c_custkey]}\n"
+        + "metrics:\n"
+        + "- {name: n, expression: {dialects: [{dialect: DATABRICKS, expression: COUNT(*)}]}}\n";
+    assertEquals(export(osi, null), export(osi, ""));
+  }
+
   // -- import direction (Metric View -> Apache Ossie) -----------------------
 
   private static Object importMv(String mv) {
