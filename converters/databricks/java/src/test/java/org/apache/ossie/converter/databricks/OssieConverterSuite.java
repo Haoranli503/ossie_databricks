@@ -1555,14 +1555,14 @@ public class OssieConverterSuite {
         + "[{dialect: DATABRICKS, expression: 'measure(m1)'}]}}\n"
         + "    - {name: bad_dim, expression: {dialects: "
         + "[{dialect: SNOWFLAKE, expression: bad_dim}]}}\n"
-        + "  metrics:\n"
-        + "  - {name: m1, expression: {dialects: "
+        + "metrics:\n"
+        + "- {name: m1, expression: {dialects: "
         + "[{dialect: DATABRICKS, expression: 'measure(bad_measure)'}]}}\n"
-        + "  - {name: m0, expression: {dialects: "
+        + "- {name: m0, expression: {dialects: "
         + "[{dialect: DATABRICKS, expression: d0}]}}\n"
-        + "  - {name: bad_measure, expression: {dialects: "
+        + "- {name: bad_measure, expression: {dialects: "
         + "[{dialect: SNOWFLAKE, expression: bad_measure}]}}\n"
-        + "  - {name: keep, expression: {dialects: "
+        + "- {name: keep, expression: {dialects: "
         + "[{dialect: DATABRICKS, expression: 'count(*)'}]}}\n";
 
     OssieConverter.Result result = OssieConverter.convertOssieToMetricView(osi, null);
