@@ -61,6 +61,8 @@ final class OssieConverterCommon {
   static final String VENDOR = "DATABRICKS";
   static final String DIALECT_DATABRICKS = "DATABRICKS";
   static final String DIALECT_ANSI = "ANSI_SQL";
+  // Ossie's portable, ANSI-SQL-compatible dialect; treated as an ANSI_SQL-equivalent fallback.
+  static final String DIALECT_OSSIE_SQL = "OSSIE_SQL_2026";
   static final int SYNONYM_LIMIT = 10;
   static final int STASH_VERSION = 1;
   static final String STASH_SOURCE_KEY = "source_dataset";
@@ -438,9 +440,9 @@ final class OssieConverterCommon {
 
   static String pickExpression(Object osiExpression, String scope) {
     // Keep the raw (possibly non-string) values so
-    // the type check below can fire; select DATABRICKS-or-ANSI by truthiness (`or`), so a
-    // null/empty DATABRICKS expr falls through to ANSI; and raise on a non-string chosen
-    // value rather than silently coercing it.
+    // the type check below can fire; select the first truthy of DATABRICKS, ANSI_SQL, then
+    // OSSIE_SQL_2026 (`or` chain), so a null/empty earlier dialect falls through to the next;
+    // and raise on a non-string chosen value rather than silently coercing it.
     if (osiExpression == null) {
       return null;
     }
@@ -468,13 +470,14 @@ final class OssieConverterCommon {
       dialects.put(str(get(dm, "dialect")), get(dm, "expression"));
       index++;
     }
-    Object chosen = truthy(dialects.get(DIALECT_DATABRICKS))
-        ? dialects.get(DIALECT_DATABRICKS) : dialects.get(DIALECT_ANSI);
+    Object chosen = truthy(dialects.get(DIALECT_DATABRICKS)) ? dialects.get(DIALECT_DATABRICKS)
+        : truthy(dialects.get(DIALECT_ANSI)) ? dialects.get(DIALECT_ANSI)
+        : dialects.get(DIALECT_OSSIE_SQL);
     if (chosen != null && !(chosen instanceof String)) {
       throw new ConversionException(
           "expression must be a string, got " + chosen.getClass().getSimpleName());
     }
-    return (String) chosen; // null when neither dialect present -> caller warns and skips
+    return (String) chosen; // null when no supported dialect present -> caller warns and skips
   }
 
   /**

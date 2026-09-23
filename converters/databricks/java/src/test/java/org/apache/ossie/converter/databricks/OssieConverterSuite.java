@@ -917,6 +917,98 @@ public class OssieConverterSuite {
   }
 
   @Test
+  public void ossieSql2026DimensionExportedNotDropped() {
+    // A dimension expressed only in OSSIE_SQL_2026 (Apache Ossie's portable, ANSI-compatible
+    // dialect) must be exported, not dropped (apache/ossie#442).
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "name: m\n"
+        + "datasets:\n"
+        + "- name: f\n"
+        + "  source: c.s.f\n"
+        + "  fields:\n"
+        + "  - {name: region, expression: {dialects: "
+        + "[{dialect: OSSIE_SQL_2026, expression: o_region}]}}\n"
+        + "metrics:\n"
+        + "- {name: n, expression: {dialects: [{dialect: DATABRICKS, expression: COUNT(*)}]}}\n";
+    Object out = export(osi, null);
+    @SuppressWarnings("unchecked")
+    List<Object> dims = (List<Object>) ((Map<String, Object>) out).get("dimensions");
+    @SuppressWarnings("unchecked")
+    Map<String, Object> dim = (Map<String, Object>) dims.get(0);
+    assertEquals("o_region", dim.get("expr"));
+  }
+
+  @Test
+  public void ossieSql2026MeasureExportedNotDropped() {
+    // A measure expressed only in OSSIE_SQL_2026 must be exported, not dropped (apache/ossie#442).
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "name: m\n"
+        + "datasets:\n"
+        + "- name: f\n"
+        + "  source: c.s.f\n"
+        + "  fields:\n"
+        + "  - {name: region, expression: {dialects: [{dialect: DATABRICKS, expression: region}]}}\n"
+        + "metrics:\n"
+        + "- {name: rev, expression: {dialects: "
+        + "[{dialect: OSSIE_SQL_2026, expression: SUM(amount)}]}}\n";
+    Object out = export(osi, null);
+    @SuppressWarnings("unchecked")
+    List<Object> measures = (List<Object>) ((Map<String, Object>) out).get("measures");
+    @SuppressWarnings("unchecked")
+    Map<String, Object> measure = (Map<String, Object>) measures.get(0);
+    assertEquals("SUM(amount)", measure.get("expr"));
+  }
+
+  @Test
+  public void databricksDialectPreferredOverOssieSql2026() {
+    // DATABRICKS wins over OSSIE_SQL_2026 when both are present.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "name: m\n"
+        + "datasets:\n"
+        + "- name: f\n"
+        + "  source: c.s.f\n"
+        + "  fields:\n"
+        + "  - name: region\n"
+        + "    expression:\n"
+        + "      dialects:\n"
+        + "      - {dialect: OSSIE_SQL_2026, expression: portable_region}\n"
+        + "      - {dialect: DATABRICKS, expression: dbx_region}\n"
+        + "metrics:\n"
+        + "- {name: n, expression: {dialects: [{dialect: DATABRICKS, expression: COUNT(*)}]}}\n";
+    Object out = export(osi, null);
+    @SuppressWarnings("unchecked")
+    List<Object> dims = (List<Object>) ((Map<String, Object>) out).get("dimensions");
+    @SuppressWarnings("unchecked")
+    Map<String, Object> dim = (Map<String, Object>) dims.get(0);
+    assertEquals("dbx_region", dim.get("expr"));
+  }
+
+  @Test
+  public void unsupportedDialectOnlyDroppedWithWarning() {
+    // A field whose only dialect is unsupported (here SNOWFLAKE) is dropped and warns, guarding
+    // the allowlist against silently accepting any dialect (apache/ossie#442).
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "name: m\n"
+        + "datasets:\n"
+        + "- name: f\n"
+        + "  source: c.s.f\n"
+        + "  fields:\n"
+        + "  - {name: kept, expression: {dialects: [{dialect: DATABRICKS, expression: kept}]}}\n"
+        + "  - {name: region, expression: {dialects: "
+        + "[{dialect: SNOWFLAKE, expression: o_region}]}}\n"
+        + "metrics:\n"
+        + "- {name: n, expression: {dialects: [{dialect: DATABRICKS, expression: COUNT(*)}]}}\n";
+    List<String> notices = OssieConverter.convertOssieToMetricView(osi, null).notices;
+    assertTrue(
+        notices.stream().anyMatch(n -> n.contains("no DATABRICKS/ANSI_SQL/OSSIE_SQL_2026 dialect")),
+        notices.toString());
+  }
+
+  @Test
   public void pickExpressionRejectsNonStringExpression() {
     // A non-string dialect expression (e.g. a YAML number) must raise, not be coerced.
     String osi =
