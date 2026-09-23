@@ -610,11 +610,10 @@ public class OssieConverterSuite {
   }
 
   @Test
-  @SuppressWarnings("unchecked")
-  public void importPreservesNonEquiJoinInStash() {
-    // A non-equi `on` has no schema-valid Ossie relationship (from/to columns are required), so the
-    // converter warns and stashes the whole join under the model's DATABRICKS custom_extensions
-    // rather than emitting an invalid stub relationship (issue #321).
+  public void nonEquiOnRejected() {
+    // A non-equi `on` has no Apache Ossie relationship form (from/to columns are required), so it is
+    // rejected on import rather than emitting a relationship with empty column lists. Matches the
+    // Python converter (test_non_equi_on_rejected).
     String mv =
         "version: '1.1'\n"
         + "source: c.s.orders\n"
@@ -622,70 +621,29 @@ public class OssieConverterSuite {
         + "- name: customer\n"
         + "  source: c.s.customer\n"
         + "  on: source.o_custkey >= customer.c_custkey\n";
-    OssieConverter.Result result = OssieConverter.convertMetricViewToOssie(mv, null);
-    assertTrue(result.notices.stream().anyMatch(n -> n.contains("non-equi or unsupported")),
-        result.notices.toString());
-    Map<String, Object> out = (Map<String, Object>) OssieConverter.parseYaml(result.yaml);
-    Map<String, Object> model = out;
-    // No stub relationship is emitted; the join lives only in the model's custom_extensions.
-    assertFalse(model.containsKey("relationships"), result.yaml);
-    assertTrue(model.containsKey("custom_extensions"), result.yaml);
-    assertTrue(result.yaml.contains("source.o_custkey >= customer.c_custkey"), result.yaml);
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertMetricViewToOssie(mv, null));
+    assertTrue(e.getMessage().contains("non-equi"), e.getMessage());
   }
 
   @Test
-  public void nonEquiJoinSurvivesRoundTripViaStash() {
-    // The preserved raw `on` is restored verbatim on the way back, so a metric view whose join
-    // carries business logic round-trips instead of being rejected (issue #321).
-    String mv =
-        "version: '1.1'\n"
-        + "source: c.s.orders\n"
-        + "joins:\n"
-        + "- name: customer\n"
-        + "  source: c.s.customer\n"
-        + "  on: source.o_custkey >= customer.c_custkey\n"
-        + "dimensions:\n"
-        + "- name: cust\n"
-        + "  expr: customer.c_name\n"
-        + "measures:\n"
-        + "- name: revenue\n"
-        + "  expr: SUM(o_totalprice)\n";
-    String ossie = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
-    String mv2 = OssieConverter.convertOssieToMetricView(ossie, null).yaml;
-    assertTrue(mv2.contains("source.o_custkey >= customer.c_custkey"), mv2);
-  }
-
-  @Test
-  @SuppressWarnings("unchecked")
-  public void nestedNonEquiJoinKeepsAliasesOnRoundTrip() {
-    // A nested join's non-equi `on` references the parent join's alias. On import the alias is
-    // assigned from the (unique) dataset name our exporter emits, so the verbatim-restored `on`
-    // still names the aliases the importer actually assigned -- no stale-qualifier rewrite needed.
-    String mv =
-        "version: '1.1'\n"
-        + "source: c.s.orders\n"
-        + "joins:\n"
-        + "- name: customer\n"
-        + "  source: c.s.customer\n"
-        + "  on: source.o_custkey = customer.c_custkey\n"
-        + "  joins:\n"
-        + "  - name: nation\n"
-        + "    source: c.s.nation\n"
-        + "    on: customer.c_nationkey <> nation.n_nationkey\n"
-        + "measures:\n"
-        + "- name: revenue\n"
-        + "  expr: SUM(o_totalprice)\n";
-    String ossie = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
-    Map<String, Object> mv2 = (Map<String, Object>) OssieConverter.parseYaml(
-        OssieConverter.convertOssieToMetricView(ossie, null).yaml);
-    Map<String, Object> customer = (Map<String, Object>) ((List<Object>) mv2.get("joins")).get(0);
-    assertEquals("customer", customer.get("name"));
-    Map<String, Object> nation =
-        (Map<String, Object>) ((List<Object>) customer.get("joins")).get(0);
-    // The nested join keeps its alias, and the restored `on` references it and the parent alias
-    // `customer` -- exactly the aliases the importer assigned, so the clause resolves.
-    assertEquals("nation", nation.get("name"));
-    assertEquals("customer.c_nationkey <> nation.n_nationkey", nation.get("on"));
+  public void complexEquiOnRejected() {
+    // An equi `on` whose operand is a SQL fragment (OR-joined, or computed) cannot be decomposed
+    // into from/to columns, so it is rejected rather than producing a relationship with empty
+    // column lists. Matches the Python converter (test_complex_equi_on_rejected).
+    for (String cond : new String[] {
+        "source.a = dim.b OR source.c = dim.d", "source.a = dim.b + 1"}) {
+      String mv =
+          "version: '1.1'\n"
+          + "source: c.s.fact\n"
+          + "joins:\n"
+          + "- name: dim\n"
+          + "  source: c.s.dim\n"
+          + "  on: " + cond + "\n";
+      OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+          () -> OssieConverter.convertMetricViewToOssie(mv, null));
+      assertTrue(e.getMessage().contains("non-equi"), e.getMessage());
+    }
   }
 
   @Test
@@ -706,57 +664,6 @@ public class OssieConverterSuite {
     String ossie = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
     String mv2 = OssieConverter.convertOssieToMetricView(ossie, null).yaml;
     assertTrue(mv2.contains("orders.o_custkey = customer.c_custkey"), mv2);
-  }
-
-  @Test
-  public void complexJoinPreservesCardinalityOnRoundTrip() {
-    // A complex (non-decomposable) join on the one_to_many branch stashes `on` and `cardinality`
-    // as flat keys on the columns-less entry; both are restored verbatim on the way back.
-    String mv =
-        "version: '1.1'\n"
-        + "source: c.s.orders\n"
-        + "joins:\n"
-        + "- name: lineitem\n"
-        + "  source: c.s.lineitem\n"
-        + "  on: source.o_orderkey <> lineitem.l_orderkey\n"
-        + "  cardinality: one_to_many\n"
-        + "measures:\n"
-        + "- name: cnt\n"
-        + "  expr: COUNT(1)\n";
-    String ossie = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
-    String mv2 = OssieConverter.convertOssieToMetricView(ossie, null).yaml;
-    assertTrue(mv2.contains("source.o_orderkey <> lineitem.l_orderkey"), mv2);
-    assertTrue(mv2.contains("one_to_many"), mv2);
-  }
-
-  @Test
-  @SuppressWarnings("unchecked")
-  public void complexJoinNestedUnderComplexJoinRoundTrips() {
-    // A complex join nested under another complex join: both edges live in the model stash, and the
-    // reverse merge rebuilds the tree so each raw `on` and the nesting are restored.
-    String mv =
-        "version: '1.1'\n"
-        + "source: c.s.orders\n"
-        + "joins:\n"
-        + "- name: customer\n"
-        + "  source: c.s.customer\n"
-        + "  on: source.o_custkey <> customer.c_custkey\n"
-        + "  joins:\n"
-        + "  - name: nation\n"
-        + "    source: c.s.nation\n"
-        + "    on: customer.c_nationkey <> nation.n_nationkey\n"
-        + "measures:\n"
-        + "- name: cnt\n"
-        + "  expr: COUNT(1)\n";
-    String ossie = OssieConverter.convertMetricViewToOssie(mv, null).yaml;
-    Map<String, Object> mv2 = (Map<String, Object>) OssieConverter.parseYaml(
-        OssieConverter.convertOssieToMetricView(ossie, null).yaml);
-    Map<String, Object> customer = (Map<String, Object>) ((List<Object>) mv2.get("joins")).get(0);
-    assertEquals("source.o_custkey <> customer.c_custkey", customer.get("on"));
-    Map<String, Object> nation =
-        (Map<String, Object>) ((List<Object>) customer.get("joins")).get(0);
-    assertEquals("nation", nation.get("name"));
-    assertEquals("customer.c_nationkey <> nation.n_nationkey", nation.get("on"));
   }
 
   @Test

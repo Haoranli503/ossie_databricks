@@ -173,23 +173,6 @@ final class OssieToMetricView {
     List<Map<String, Object>> metrics = schemaMapList(model, "metrics", modelScope);
 
     Map<String, Object> modelStash = readStash(model, notices, modelScope);
-    // A non-equi/filtered join has no schema-valid Ossie relationship (from/to columns are
-    // required), so MetricViewToOssie stashes it under the model's DATABRICKS custom_extensions
-    // (complex_joins) rather than emitting a stub relationship. Rebuild a columns-less
-    // relationship for each -- carrying its raw `on` (and rely/cardinality) in the stash that
-    // buildJoin restores from -- and merge them in so the join tree includes them.
-    for (Map<String, Object> pj : schemaMapList(modelStash, "complex_joins", modelScope)) {
-      Map<String, Object> rel = new LinkedHashMap<>();
-      rel.put("name", get(pj, "name"));
-      rel.put("from", get(pj, "from"));
-      rel.put("to", get(pj, "to"));
-      Map<String, Object> stash = new LinkedHashMap<>(pj);
-      stash.remove("name");
-      stash.remove("from");
-      stash.remove("to");
-      writeStash(rel, stash);
-      relationships.add(rel);
-    }
     String factHint = explicitSource != null && !explicitSource.isEmpty()
         ? explicitSource : str(get(modelStash, STASH_SOURCE_KEY));
     Object[] built = buildJoinTree(name, datasets, relationships, factHint, notices);
@@ -722,9 +705,10 @@ final class OssieToMetricView {
     List<String> fromCols = strList(get(rel, "from_columns"));
     List<String> toCols = strList(get(rel, "to_columns"));
     if (stash.containsKey("on")) {
-      // A non-equi/filtered `on` with no Ossie relationship representation was preserved verbatim
-      // in the DATABRICKS stash by MetricViewToOssie.convertJoin (the relationship carries no
-      // from/to columns). Restore it directly rather than rebuilding an `on` from columns.
+      // MetricViewToOssie.convertJoin stashes the original `on` verbatim when rebuilding it from the
+      // equi-join's from/to columns would not reproduce it (a fact side qualified by the source
+      // table name, or an `on` over equal columns that rebuilds as `using`). Restore it directly
+      // rather than rebuilding from columns.
       join.put("on", stash.get("on"));
     } else {
       validateJoinColumns(rel, fromCols, toCols);

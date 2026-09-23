@@ -111,7 +111,7 @@ Each row maps in both directions; the **Notes** flag where a behavior is specifi
 | `semantic_model.description` | `comment` | Model-level description only. |
 | root dataset | `source` | The fact/grain. |
 | other `datasets` | nested `joins[]` | Export: the relationship graph is reassembled into the join tree; a dataset reached by two paths (a diamond) fans out into one aliased join per path. |
-| `relationship` `from_columns`/`to_columns` | join `on` (differing names) / `using` (shared names) | Decomposed into columns on import; rebuilt into `on`/`using` on export. A join `on` that is non-equi, function-wrapped, or carries an extra filter has no equi-join relationship form, so on import it is preserved verbatim in the model-level `complex_joins` stash (under `custom_extensions[DATABRICKS]`) instead of a relationship, and export rebuilds it. |
+| `relationship` `from_columns`/`to_columns` | join `on` (differing names) / `using` (shared names) | Decomposed into columns on import; rebuilt into `on`/`using` on export. A join `on` that is non-equi, function-wrapped, or carries an extra filter has no equi-join relationship form, so it is rejected on import (matching the Python converter) rather than emitting a relationship with empty column lists. |
 | `relationship.from`/`to` direction | join `cardinality` | Export: source on the many (`from`) side -> `many_to_one`; on the one (`to`) side -> `one_to_many`. |
 | `dataset.primary_key` / `unique_keys` | join `rely.at_most_one_match` | Both directions: export sets `at_most_one_match` when a key covers the join columns; import recovers a `unique_keys` from it. |
 | `dataset.fields[]` | `dimensions[]` | Export: fields flatten into one list and a joined column is qualified by its full join path (`customer.c_name`; `customer.region.r_name` when nested). |
@@ -140,6 +140,8 @@ an input breaks one of these:
   JSON roots are rejected; missing, null, or empty `data` is treated as an empty object.
   Dataset-level `DATABRICKS` data has no Metric View counterpart and is not consumed;
 - a join has no condition (a cross join has no Apache Ossie relationship form);
+- a join `on` is not an equi-join of simple `alias.column` pairs (it is non-equi, function-wrapped,
+  or carries an extra filter predicate), so it has no Apache Ossie relationship form;
 - the input YAML is malformed or contains duplicate mapping keys.
 
 ## Development
