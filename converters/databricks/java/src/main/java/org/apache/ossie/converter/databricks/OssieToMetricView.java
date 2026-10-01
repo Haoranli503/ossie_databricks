@@ -358,6 +358,11 @@ final class OssieToMetricView {
         throw new ConversionException("Model '" + modelName + "': relationship '"
             + str(get(rel, "name")) + "' references an unknown dataset");
       }
+      for (String key : new String[] {"from_columns", "to_columns"}) {
+        if (rel.get(key) != null && !(rel.get(key) instanceof List)) {
+          throw new ConversionException(scope + ": from_columns and to_columns must be lists");
+        }
+      }
     }
     List<Map<String, Object>> relationships = new ArrayList<>();
     for (Map<String, Object> rel : relationships0) {
@@ -1170,9 +1175,12 @@ final class OssieToMetricView {
     }
     for (Object relObj : asList(get(model, "relationships"))) {
       Map<String, Object> rel = asMap(relObj);
+      String rn = rel.containsKey("name") ? str(get(rel, "name")) : "<unnamed>";
       if (truthy(get(rel, "ai_context"))) {
-        String rn = rel.containsKey("name") ? str(get(rel, "name")) : "<unnamed>";
         notices.warn("relationship '" + rn + "'", "relationship ai_context dropped");
+      }
+      if (!foreignVendorExtensions(rel).isEmpty()) {
+        notices.warn("relationship '" + rn + "'", "foreign-vendor custom_extensions dropped");
       }
     }
   }
@@ -1186,16 +1194,20 @@ final class OssieToMetricView {
   }
 
   /**
-   * Notices shared by a field and a metric: the members of an `ai_context` OBJECT that have no
-   * Metric View slot, and foreign-vendor extensions.
+   * Notices shared by a field and a metric: `datatype`, the members of an `ai_context` OBJECT that
+   * have no Metric View slot, and foreign-vendor extensions.
    *
    * <p>`ai_context` is `string | object` in the Apache Ossie schema. The string form maps to the
    * column comment (mergeDescription) and the object's `synonyms` maps to the column's synonyms,
-   * but every other object member -- `instructions`, `examples` -- has nowhere to go. Naming them
-   * keeps the "dropped with a notice" contract that the dataset- and model-level checks in
-   * warnDroppedModel already honour.
+   * but every other object member -- `instructions`, `examples` -- has nowhere to go. `datatype` (a
+   * logical type on a field or metric) likewise has no Metric View slot, where a column's type is
+   * inferred from its expression. Naming them keeps the "dropped with a notice" contract that the
+   * dataset- and model-level checks in warnDroppedModel already honour.
    */
   private static void warnDroppedColumn(Map<String, Object> column, String scope, Notices notices) {
+    if (get(column, "datatype") != null) {
+      notices.warn(scope, "datatype has no Metric View counterpart; dropped");
+    }
     Object aiContext = get(column, "ai_context");
     if (aiContext instanceof Map) {
       List<String> dropped = new ArrayList<>();

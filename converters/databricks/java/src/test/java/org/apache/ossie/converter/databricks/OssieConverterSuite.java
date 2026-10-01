@@ -499,6 +499,70 @@ public class OssieConverterSuite {
   }
 
   @Test
+  public void datatypeDroppedWithNotice() {
+    // `datatype` (a logical type on a field or metric) has no Metric View slot, where a column's
+    // type is inferred from its expression, so it is dropped with a notice on both.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "name: m\n"
+        + "datasets:\n"
+        + "- name: f\n"
+        + "  source: c.s.f\n"
+        + "  fields:\n"
+        + "  - {name: d, datatype: String, expression: "
+        + "{dialects: [{dialect: DATABRICKS, expression: d}]}}\n"
+        + "metrics:\n"
+        + "- {name: n, datatype: Integer, expression: "
+        + "{dialects: [{dialect: DATABRICKS, expression: COUNT(*)}]}}\n";
+    OssieConverter.Result r = OssieConverter.convertOssieToMetricView(osi, null);
+    assertTrue(r.notices.contains("[field 'd'] datatype has no Metric View counterpart; dropped"),
+        r.notices.toString());
+    assertTrue(r.notices.contains("[metric 'n'] datatype has no Metric View counterpart; dropped"),
+        r.notices.toString());
+  }
+
+  @Test
+  public void relationshipForeignVendorExtensionDroppedWithNotice() {
+    // A foreign-vendor custom_extensions on a relationship has no Metric View slot, so it is
+    // dropped with a notice, matching the model/dataset/field levels.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "name: m\n"
+        + "datasets:\n"
+        + "- name: o\n"
+        + "  source: c.s.o\n"
+        + "  fields:\n"
+        + "  - {name: a, expression: {dialects: [{dialect: DATABRICKS, expression: a}]}}\n"
+        + "- {name: c, source: c.s.c, primary_key: [k]}\n"
+        + "relationships:\n"
+        + "- {name: oc, from: o, to: c, from_columns: [k], to_columns: [k], "
+        + "custom_extensions: [{vendor_name: SNOWFLAKE, data: '{}'}]}\n"
+        + "metrics:\n"
+        + "- {name: n, expression: {dialects: [{dialect: DATABRICKS, expression: COUNT(*)}]}}\n";
+    OssieConverter.Result r = OssieConverter.convertOssieToMetricView(osi, null);
+    assertTrue(r.notices.contains("[relationship 'oc'] foreign-vendor custom_extensions dropped"),
+        r.notices.toString());
+  }
+
+  @Test
+  public void scalarJoinColumnsRejectedAsMustBeLists() {
+    // from_columns/to_columns given as a scalar (not a list) raise a clear "must be lists" error
+    // rather than the misleading "are required" (empty-list) or a character-count length error.
+    String osi =
+        "version: 0.2.0.dev0\n"
+        + "name: m\n"
+        + "datasets:\n"
+        + "- {name: a, source: c.s.a, fields: "
+        + "[{name: x, expression: {dialects: [{dialect: DATABRICKS, expression: x}]}}]}\n"
+        + "- {name: b, source: c.s.b}\n"
+        + "relationships:\n"
+        + "- {name: ab, from: a, to: b, from_columns: cid, to_columns: id}\n";
+    OssieConverter.ConversionException e = assertThrows(OssieConverter.ConversionException.class,
+        () -> OssieConverter.convertOssieToMetricView(osi, null));
+    assertTrue(e.getMessage().contains("must be lists"), e.getMessage());
+  }
+
+  @Test
   public void emptyExplicitSourceFallsBackLikeAbsent() {
     // An empty --source (e.g. an unset shell variable) must be treated as absent and fall back to
     // the fact heuristic, not taken as a real override (which would fail as "requested source ''
