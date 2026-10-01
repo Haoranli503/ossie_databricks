@@ -1003,7 +1003,7 @@ final class OssieToMetricView {
       }
       Map<String, Object> column = (measure ? measures : dimensions).get(index);
       String name = (String) column.get("name");
-      String reference = referencesDropped((String) column.get("expr"), name);
+      String reference = referencesDropped((String) column.get("expr"), name, measure);
       if (reference == null) {
         return;
       }
@@ -1026,13 +1026,13 @@ final class OssieToMetricView {
       Pattern pattern = referencePattern(name, measureReference);
       for (int index = 0; index < dimensions.size(); index++) {
         if (!isPending(index, false)
-            && matches(dimensions.get(index), name, measureReference, pattern)) {
+            && matches(dimensions.get(index), name, measureReference, false, pattern)) {
           schedule(index, false, phase, sourceIndex);
         }
       }
       for (int index = 0; index < measures.size(); index++) {
         if (!isPending(index, true)
-            && matches(measures.get(index), name, measureReference, pattern)) {
+            && matches(measures.get(index), name, measureReference, true, pattern)) {
           schedule(index, true, phase, sourceIndex);
         }
       }
@@ -1047,10 +1047,23 @@ final class OssieToMetricView {
       return removedDims.get(index) || dimsNow.get(index) || dimsNext.get(index);
     }
 
+    /**
+     * A column is a self-reference to a dropped name only within its own kind, compared
+     * case-insensitively (Databricks SQL identifiers are case-insensitive). A column that merely
+     * shares a dropped column's name across kinds (a measure vs a dropped dimension, or vice
+     * versa) is a different object, so it is still matched and cascade-dropped. Shared by both
+     * cascade paths -- the schedule path (matches) and the confirm path (referencesDropped) -- so
+     * the two guards cannot drift.
+     */
+    private static boolean isSelfReference(
+        boolean columnIsMeasure, boolean droppedIsMeasure, String columnName, String droppedName) {
+      return columnIsMeasure == droppedIsMeasure && droppedName.equalsIgnoreCase(columnName);
+    }
+
     private static boolean matches(Map<String, Object> column, String reference,
-        boolean measureReference, Pattern pattern) {
+        boolean measureReference, boolean columnIsMeasure, Pattern pattern) {
       String name = (String) column.get("name");
-      if (!measureReference && reference.equals(name)) {
+      if (isSelfReference(columnIsMeasure, measureReference, name, reference)) {
         return false;
       }
       String expr = (String) column.get("expr");
@@ -1073,19 +1086,25 @@ final class OssieToMetricView {
       }
     }
 
-    private String referencesDropped(String expr, String selfName) {
+    private String referencesDropped(String expr, String selfName, boolean selfIsMeasure) {
       // Databricks SQL identifiers are case-insensitive, so match a dropped name against the
       // expression case-insensitively: both the pre-filter here and the regex in referencePattern.
+      // The per-kind self-reference exemption is isSelfReference (shared with matches).
       String lowerExpr = expr.toLowerCase(Locale.ROOT);
       for (String name : droppedMeasures) {
-        if (name != null && lowerExpr.contains(name.toLowerCase(Locale.ROOT))
+        if (name == null || isSelfReference(selfIsMeasure, true, selfName, name)) {
+          continue;
+        }
+        if (lowerExpr.contains(name.toLowerCase(Locale.ROOT))
             && findOutsideLiterals(expr, referencePattern(name, true))) {
           return name;
         }
       }
       for (String name : droppedDims) {
-        if (name != null && !name.equals(selfName)
-            && lowerExpr.contains(name.toLowerCase(Locale.ROOT))
+        if (name == null || isSelfReference(selfIsMeasure, false, selfName, name)) {
+          continue;
+        }
+        if (lowerExpr.contains(name.toLowerCase(Locale.ROOT))
             && findOutsideLiterals(expr, referencePattern(name, false))) {
           return name;
         }
@@ -1095,9 +1114,12 @@ final class OssieToMetricView {
 
     private Pattern referencePattern(String name, boolean measure) {
       Map<String, Pattern> patterns = measure ? measurePatterns : dimensionPatterns;
+      // A dimension is referenced as a bare, unqualified token. The trailing (?!\s*\() excludes a
+      // same-spelled function/keyword call such as YEAR(...), which is a function, not a reference
+      // to a dropped `year` dimension.
       return patterns.computeIfAbsent(name, ignored -> Pattern.compile(measure
           ? "measure\\(\\s*" + Pattern.quote(name) + "\\s*\\)"
-          : "(?<![\\w.])" + Pattern.quote(name) + "(?![\\w.])",
+          : "(?<![\\w.])" + Pattern.quote(name) + "(?![\\w.])(?!\\s*\\()",
           Pattern.CASE_INSENSITIVE));
     }
 

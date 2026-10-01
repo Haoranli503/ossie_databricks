@@ -1243,6 +1243,96 @@ public class OssieConverterSuite {
   }
 
   @Test
+  @SuppressWarnings("unchecked")
+  public void cascadeDropKeepsAFunctionCallNamedLikeADroppedField() {
+    // A dropped field whose name collides with a SQL function token in a surviving expression must
+    // not cascade-drop it: COUNT_IF(YEAR(order_date) = 2026) calls the YEAR function, it is not a
+    // reference to a dropped `year` field. The reference match excludes a NAME(...) function call.
+    String osi =
+        "version: \"0.2.0.dev0\"\n"
+        + "name: m\n"
+        + "datasets:\n"
+        + "  - name: d\n"
+        + "    source: cat.sch.t\n"
+        + "    fields:\n"
+        + "      - name: order_date\n"
+        + "        expression:\n"
+        + "          dialects: [{dialect: DATABRICKS, expression: order_date}]\n"
+        + "      - name: year\n"
+        + "        expression:\n"
+        + "          dialects: [{dialect: T_SQL, expression: year}]\n"
+        + "metrics:\n"
+        + "  - name: orders_2026\n"
+        + "    expression:\n"
+        + "      dialects: [{dialect: DATABRICKS, expression: COUNT_IF(YEAR(order_date) = 2026)}]\n";
+    OssieConverter.Result result = OssieConverter.convertOssieToMetricView(osi, null);
+    Map<String, Object> view = (Map<String, Object>) OssieConverter.parseYaml(result.yaml);
+    List<Object> measures = (List<Object>) view.get("measures");
+    // YEAR(...) is a function call, not a reference to the dropped `year`, so the measure survives.
+    assertEquals(1, measures.size(), result.yaml);
+    assertEquals("orders_2026", ((Map<String, Object>) measures.get(0)).get("name"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void cascadeDropKeepsASurvivorDifferingFromADroppedFieldOnlyInCase() {
+    // A dropped field and a surviving dimension whose names differ only in case can coexist. The
+    // survivor's bare self-reference (`region`) is its own name, not a reference to the dropped
+    // `REGION`, so the self-guard is case-folded and the survivor is kept.
+    String osi =
+        "version: \"0.2.0.dev0\"\n"
+        + "name: m\n"
+        + "datasets:\n"
+        + "  - name: d\n"
+        + "    source: cat.sch.t\n"
+        + "    fields:\n"
+        + "      - name: REGION\n"
+        + "        expression:\n"
+        + "          dialects: [{dialect: T_SQL, expression: REGION}]\n"
+        + "      - name: region\n"
+        + "        expression:\n"
+        + "          dialects: [{dialect: DATABRICKS, expression: region}]\n";
+    OssieConverter.Result result = OssieConverter.convertOssieToMetricView(osi, null);
+    Map<String, Object> view = (Map<String, Object>) OssieConverter.parseYaml(result.yaml);
+    List<Object> dims = (List<Object>) view.get("dimensions");
+    assertEquals(1, dims.size(), result.yaml);
+    assertEquals("region", ((Map<String, Object>) dims.get(0)).get("name"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void cascadeDropDropsAMeasureNamedLikeADroppedDimension() {
+    // A measure that shares a dropped dimension's name -- same name, SAME case -- is not a
+    // self-reference: the guard is scoped to the column's own kind, so the measure's reference to
+    // the dropped dimension is detected and the measure is cascade-dropped rather than emitted
+    // dangling. The same-case clash is what pins the kind-scoping: a case-only difference already
+    // cascade-drops without it (the pre-fix guard was case-sensitive), so this must match case.
+    String osi =
+        "version: \"0.2.0.dev0\"\n"
+        + "name: m\n"
+        + "datasets:\n"
+        + "  - name: d\n"
+        + "    source: cat.sch.t\n"
+        + "    fields:\n"
+        + "      - name: id\n"
+        + "        expression:\n"
+        + "          dialects: [{dialect: DATABRICKS, expression: id}]\n"
+        + "      - name: region\n"
+        + "        expression:\n"
+        + "          dialects: [{dialect: T_SQL, expression: region}]\n"
+        + "metrics:\n"
+        + "  - name: region\n"
+        + "    expression:\n"
+        + "      dialects: [{dialect: DATABRICKS, expression: SUM(region)}]\n";
+    OssieConverter.Result result = OssieConverter.convertOssieToMetricView(osi, null);
+    Map<String, Object> view = (Map<String, Object>) OssieConverter.parseYaml(result.yaml);
+    assertFalse(view.containsKey("measures"),
+        "measure 'region' must cascade-drop, got: " + view.get("measures"));
+    assertTrue(result.notices.contains(cascadeNotice("measure", "region", "region")),
+        result.notices.toString());
+  }
+
+  @Test
   public void stashPreservesABackslashBeforeAUnicodeEscape() {
     // The stash lowercases the hex of Jackson's \\uXXXX escapes. That rewrite must re-emit any
     // escaped-backslash run in front of the escape verbatim; it used to halve it, so a value
