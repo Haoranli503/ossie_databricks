@@ -1474,7 +1474,7 @@ public class OssieConverterSuite {
         "expected the same source-shape error the export raises, got: " + e.getMessage());
   }
 
-  // -- import direction: aliases, source/join validation, stash recovery ------
+  // -- import direction: coverage ported from the Python converter suite -----
 
   @Test
   @SuppressWarnings("unchecked")
