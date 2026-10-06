@@ -539,13 +539,24 @@ public class FieldMappingHandler implements PipelineStep {
 
     /**
      * Applies default values for required Salesforce field properties.
-     * Only sets defaults if the property is not already present.
+     * Only sets a default where the property carries no usable value.
      * Defaults are applied AFTER custom extensions and mappings.
+     *
+     * <p>An Ossie field's label is optional, so an exported dimension or measurement carries
+     * one only when the field sets it or custom_extensions restored it. Salesforce requires a
+     * label, so it falls back to the apiName, matching
+     * DatasetMappingHandler/MetricMappingHandler. An empty or blank label is treated as
+     * missing, because Salesforce rejects it with the same RequiredFieldException.
      *
      * @param sfField The Salesforce field to apply defaults to
      */
     private void applyFieldDefaults(Map<String, Object> sfField) {
         sfField.putIfAbsent(DISPLAY_CATEGORY, DISPLAY_CATEGORY_CONTINUOUS);
+        String apiName = getString(sfField, API_NAME);
+        Object label = sfField.get(LABEL);
+        if (apiName != null && (label == null || label.toString().isBlank())) {
+            sfField.put(LABEL, apiName);
+        }
     }
 
     /**

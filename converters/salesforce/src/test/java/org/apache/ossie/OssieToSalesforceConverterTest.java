@@ -287,6 +287,224 @@ class OssieToSalesforceConverterTest {
     }
 
     @Test
+    void testFieldLabelDefaultsToApiNameWhenOssieHasNoLabel() throws Exception {
+        // Normalize line endings first: the fixture file may check out with CRLF depending on
+        // the platform's autocrlf setting, but the substitutions below are written with LF.
+        // Drop the Ossie label from one dimension and one measurement; every other field keeps
+        // its own, so this also pins that an explicit label is still carried through untouched.
+        String yamlWithoutLabels = ossieYaml.replace("\r\n", "\n")
+                .replace("  - name: product_name\n"
+                        + "    datatype: String\n"
+                        + "    label: Product Name\n",
+                        "  - name: product_name\n"
+                        + "    datatype: String\n")
+                .replace("  - name: stock_level\n"
+                        + "    datatype: Decimal\n"
+                        + "    label: Stock Level\n",
+                        "  - name: stock_level\n"
+                        + "    datatype: Decimal\n");
+        assertFalse(yamlWithoutLabels.contains("label: Product Name"), "fixture text substitution did not match");
+        assertFalse(yamlWithoutLabels.contains("label: Stock Level"), "fixture text substitution did not match");
+
+        List<String> results = converter.convert(yamlWithoutLabels);
+        Map<String, Object> sfModel = jsonMapper.readValue(results.get(0), new TypeReference<Map<String, Object>>() {});
+
+        List<Map<String, Object>> dataObjects = (List<Map<String, Object>>) sfModel.get("semanticDataObjects");
+        Map<String, Object> productsDataset = dataObjects.stream()
+                .filter(d -> "Products".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(productsDataset);
+
+        List<Map<String, Object>> productDimensions =
+                (List<Map<String, Object>>) productsDataset.get("semanticDimensions");
+        Map<String, Object> productName = productDimensions.stream()
+                .filter(d -> "product_name".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(productName);
+        assertEquals("product_name", productName.get("label"),
+                "a dimension with no Ossie label should default its label to apiName");
+
+        Map<String, Object> productId = productDimensions.stream()
+                .filter(d -> "product_id".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(productId);
+        assertEquals("Product ID", productId.get("label"),
+                "an explicit Ossie label should still win over the apiName default");
+
+        List<Map<String, Object>> productMeasurements =
+                (List<Map<String, Object>>) productsDataset.get("semanticMeasurements");
+        Map<String, Object> stockLevel = productMeasurements.stream()
+                .filter(m -> "stock_level".equals(m.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(stockLevel);
+        assertEquals("stock_level", stockLevel.get("label"),
+                "a measurement with no Ossie label should default its label to apiName");
+    }
+
+    @Test
+    void testBlankOrNullFieldLabelIsDefaultedToApiName() throws Exception {
+        // Normalize line endings first: the fixture file may check out with CRLF depending on
+        // the platform's autocrlf setting, but the substitutions below are written with LF.
+        // The Ossie schema puts no minLength on a field label, so an empty one is a valid
+        // model, and a label restored from custom_extensions can be null. Salesforce rejects
+        // both exactly as it rejects a missing MasterLabel.
+        String yamlWithBlankLabels = ossieYaml.replace("\r\n", "\n")
+                .replace("    label: Unit Price\n", "    label: \"\"\n")
+                .replace("    label: Order ID\n", "")
+                .replace("        expression: order_id__c\n"
+                        + "    custom_extensions:\n"
+                        + "    - vendor_name: SALESFORCE\n"
+                        + "      data: |-\n"
+                        + "        {\n",
+                        "        expression: order_id__c\n"
+                        + "    custom_extensions:\n"
+                        + "    - vendor_name: SALESFORCE\n"
+                        + "      data: |-\n"
+                        + "        {\n"
+                        + "          \"label\" : null,\n");
+        assertFalse(yamlWithBlankLabels.contains("label: Unit Price"), "fixture text substitution did not match");
+        assertFalse(yamlWithBlankLabels.contains("label: Order ID"), "fixture text substitution did not match");
+        assertTrue(yamlWithBlankLabels.contains("\"label\" : null"), "fixture text substitution did not match");
+
+        List<String> results = converter.convert(yamlWithBlankLabels);
+        Map<String, Object> sfModel = jsonMapper.readValue(results.get(0), new TypeReference<Map<String, Object>>() {});
+
+        List<Map<String, Object>> dataObjects = (List<Map<String, Object>>) sfModel.get("semanticDataObjects");
+        Map<String, Object> productsDataset = dataObjects.stream()
+                .filter(d -> "Products".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(productsDataset);
+
+        List<Map<String, Object>> productMeasurements =
+                (List<Map<String, Object>>) productsDataset.get("semanticMeasurements");
+        Map<String, Object> unitPrice = productMeasurements.stream()
+                .filter(m -> "unit_price".equals(m.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(unitPrice);
+        assertEquals("unit_price", unitPrice.get("label"),
+                "an empty Ossie label should be defaulted to apiName, not exported as is");
+
+        Map<String, Object> ordersDataset = dataObjects.stream()
+                .filter(d -> "Orders".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(ordersDataset);
+
+        List<Map<String, Object>> orderDimensions =
+                (List<Map<String, Object>>) ordersDataset.get("semanticDimensions");
+        Map<String, Object> orderId = orderDimensions.stream()
+                .filter(d -> "order_id".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(orderId);
+        assertEquals("order_id", orderId.get("label"),
+                "a null label restored from custom_extensions should be defaulted to apiName");
+    }
+
+    @Test
+    void testFieldLabelFromCustomExtensionsWinsOverApiNameDefault() throws Exception {
+        // Normalize line endings first: the fixture file may check out with CRLF depending on
+        // the platform's autocrlf setting, but the substitution below is written with LF.
+        // Drop the Ossie label from product_name and stash a Salesforce one in its
+        // custom_extensions instead, so the only label available is the restored one.
+        String yamlWithExtensionLabel = ossieYaml.replace("\r\n", "\n").replace(
+                "  - name: product_name\n"
+                        + "    datatype: String\n"
+                        + "    label: Product Name\n"
+                        + "    description: Product display name\n"
+                        + "    dimension:\n"
+                        + "      is_time: false\n"
+                        + "    expression:\n"
+                        + "      dialects:\n"
+                        + "      - dialect: ANSI_SQL\n"
+                        + "        expression: product_name__c\n"
+                        + "    custom_extensions:\n"
+                        + "    - vendor_name: SALESFORCE\n"
+                        + "      data: |-\n"
+                        + "        {\n"
+                        + "          \"dataType\" : \"Text\",\n",
+                "  - name: product_name\n"
+                        + "    datatype: String\n"
+                        + "    description: Product display name\n"
+                        + "    dimension:\n"
+                        + "      is_time: false\n"
+                        + "    expression:\n"
+                        + "      dialects:\n"
+                        + "      - dialect: ANSI_SQL\n"
+                        + "        expression: product_name__c\n"
+                        + "    custom_extensions:\n"
+                        + "    - vendor_name: SALESFORCE\n"
+                        + "      data: |-\n"
+                        + "        {\n"
+                        + "          \"label\" : \"Product Name (Custom Label)\",\n"
+                        + "          \"dataType\" : \"Text\",\n");
+        assertFalse(yamlWithExtensionLabel.contains("label: Product Name"),
+                "fixture text substitution did not match");
+        assertTrue(yamlWithExtensionLabel.contains("Product Name (Custom Label)"),
+                "fixture text substitution did not match");
+
+        List<String> results = converter.convert(yamlWithExtensionLabel);
+        Map<String, Object> sfModel = jsonMapper.readValue(results.get(0), new TypeReference<Map<String, Object>>() {});
+
+        List<Map<String, Object>> dataObjects = (List<Map<String, Object>>) sfModel.get("semanticDataObjects");
+        Map<String, Object> productsDataset = dataObjects.stream()
+                .filter(d -> "Products".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(productsDataset);
+
+        List<Map<String, Object>> productDimensions =
+                (List<Map<String, Object>>) productsDataset.get("semanticDimensions");
+        Map<String, Object> productName = productDimensions.stream()
+                .filter(d -> "product_name".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(productName);
+        assertEquals("Product Name (Custom Label)", productName.get("label"),
+                "a label restored from custom_extensions should win over the apiName default");
+    }
+
+    @Test
+    void testCalculatedDimensionLabelDefaultsToApiName() throws Exception {
+        // Normalize line endings first: the fixture file may check out with CRLF depending on
+        // the platform's autocrlf setting, but the substitutions below are written with LF.
+        // order_year is only exported as a semanticCalculatedDimension under the Tableau dialect,
+        // so switch that one field over and drop its label.
+        String yamlWithTableauCalcDim = ossieYaml.replace("\r\n", "\n")
+                .replace("  - name: order_year\n"
+                        + "    datatype: Decimal\n"
+                        + "    label: Order Year\n",
+                        "  - name: order_year\n"
+                        + "    datatype: Decimal\n")
+                .replace("      - dialect: ANSI_SQL\n"
+                        + "        expression: YEAR([Orders].[order_date])\n",
+                        "      - dialect: TABLEAU\n"
+                        + "        expression: YEAR([Orders].[order_date])\n");
+        assertFalse(yamlWithTableauCalcDim.contains("label: Order Year"), "fixture text substitution did not match");
+        assertTrue(yamlWithTableauCalcDim.contains("dialect: TABLEAU"), "fixture text substitution did not match");
+
+        List<String> results = converter.convert(yamlWithTableauCalcDim);
+        Map<String, Object> sfModel = jsonMapper.readValue(results.get(0), new TypeReference<Map<String, Object>>() {});
+
+        List<Map<String, Object>> calcDimensions =
+                (List<Map<String, Object>>) sfModel.get("semanticCalculatedDimensions");
+        assertNotNull(calcDimensions, "the Tableau dialect should produce a semanticCalculatedDimension");
+        Map<String, Object> orderYear = calcDimensions.stream()
+                .filter(d -> "order_year".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(orderYear);
+        assertEquals("order_year", orderYear.get("label"),
+                "a calculated dimension with no Ossie label should default its label to apiName");
+    }
+
+    @Test
     void testMetricsConvertedToSemanticCalculatedMeasurements() throws Exception {
         List<String> results = converter.convert(ossieYaml);
         Map<String, Object> sfModel = jsonMapper.readValue(results.get(0), new TypeReference<Map<String, Object>>() {});
