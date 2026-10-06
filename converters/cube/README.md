@@ -475,7 +475,7 @@ spec:   valid (validation/validate.py)
 
 spoke        result  warns  foreign   note
 ----------------------------------------------------------------------------
-databricks   OK         22        2
+databricks   OK         54        2
 dbt          FAIL        0        0   AttributeError: 'PydanticSemanticManifes
 gooddata     OK          0        0
 honeydew     OK          0        0
@@ -494,10 +494,13 @@ whether something belongs in a stash at all. The dbt `FAIL` is unrelated to this
 converter: its CLI crashes on every input, including this repo's own examples
 ([#296](https://github.com/apache/ossie/issues/296)).
 
-Each spoke runs in its own `uv` environment, so the first run resolves that
-converter's dependencies; the script is stdlib-only and needs none of its own. Nothing
-about it is Cube-specific except the first hop — if it is useful repo-wide it belongs
-somewhere like `compliance/`, which is a question for `dev@`.
+Each Python spoke runs in its own `uv` environment, so the first run resolves that
+converter's dependencies; the script is stdlib-only and needs none of its own. The
+Databricks converter is Java instead (Java 21+): build its jar with `mvn clean package`
+in `converters/databricks/java` first, and again after changing the converter, or its
+row reads `SKIP`. Nothing about the script is Cube-specific except the first hop — if
+it is useful repo-wide it belongs somewhere like `compliance/`, which is a question for
+`dev@`.
 
 ## Conversion issues
 

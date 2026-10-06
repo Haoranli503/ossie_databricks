@@ -40,17 +40,20 @@ Columns:
            converter imposes on every other spoke by stashing, and the number to
            watch when deciding whether something belongs in a stash at all
 
-Each spoke runs in its own `uv` environment, so the first run for a given spoke
+Each Python spoke runs in its own `uv` environment, so the first run for a given spoke
 resolves its dependencies (`uv sync` there first to keep this fast) -- which leaves a
 `uv.lock` and a `.venv` in that converter's directory. Those belong to the converter,
-not to this run: check `git status` before committing. The Java converters (polaris,
-salesforce) are listed as unsupported rather than skipped silently; they need Maven,
-not uv.
+not to this run: check `git status` before committing. The databricks spoke is a Java
+converter run from its built jar: `mvn clean package` in converters/databricks/java
+(Java 21+) first, and again after changing it, or its row reads SKIP. The other Java
+converters (polaris, salesforce) are listed as unsupported rather than skipped
+silently; they need Maven, not uv.
 
 Stdlib only, so it needs no environment of its own.
 """
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -62,9 +65,10 @@ from pathlib import Path
 #
 # The invocations differ per spoke because the CLIs do: some take an `export`
 # subcommand, some a named direction, snowflake takes none, gooddata ships no CLI at
-# all and is driven through its Python API.
+# all and is driven through its Python API, and databricks is a Java CLI run from its
+# built jar. A `None` argv means the spoke has its own runner in _RUNNERS.
 SPOKES = [
-    ("databricks", ["ossie-databricks", "export"], False),
+    ("databricks", None, False),  # Java; see _run_databricks
     ("dbt", ["ossie-dbt", "osi-to-msi"], False),
     ("gooddata", None, False),  # API-only; see _run_gooddata
     ("honeydew", ["honeydew-osi", "osi-to-honeydew"], True),
@@ -75,7 +79,7 @@ SPOKES = [
     ("wisdom", ["ossie-wisdom", "osi-to-wisdom"], False),
 ]
 
-# Converters written in Java: a different toolchain, not a missing dependency.
+# Java converters with no runner here: a different toolchain, not a missing dependency.
 UNSUPPORTED = ["polaris", "salesforce"]
 
 _WARN_RE = re.compile(r"warn", re.I)
@@ -172,6 +176,61 @@ def _run_gooddata(root, ossie, dest):
                 str(ossie), str(dest)])
 
 
+def _java_env_failure(note):
+    # Worded to match _ENV_FAILURE_MARKERS, so a missing piece reads SKIP, not FAIL.
+    return subprocess.CompletedProcess(["java"], 1, "", note)
+
+
+def _label_notices(stderr):
+    """Prefix the Java CLI's notices with `warning:` so count_warnings counts them.
+
+    The CLI lists them indented under a `Conversion notices (N):` header rather than
+    as warning lines. Only lines under that header are notices; indented lines
+    elsewhere (a parse error's context, say) are left alone.
+    """
+    out, in_notices = [], False
+    for ln in stderr.splitlines():
+        if ln.startswith("Conversion notices ("):
+            in_notices = True
+        elif in_notices and ln.startswith("  "):
+            ln = f"warning: {ln.strip()}"
+        else:
+            in_notices = False
+        out.append(ln)
+    return "\n".join(out)
+
+
+def _run_databricks(root, ossie, dest):
+    """databricks is a Java CLI: run the jar `mvn package` builds, or SKIP without it."""
+    java_dir = root / "converters/databricks/java"
+    # $JAVA_HOME is the JVM Maven built the jar with; fall back to PATH.
+    home = os.environ.get("JAVA_HOME")
+    java = (home and shutil.which("java", path=str(Path(home) / "bin"))) or shutil.which("java")
+    if java is None:
+        return _java_env_failure("java does not exist on PATH or JAVA_HOME")
+    # The shaded jar, not the shade plugin's `original-*` or a classifier jar; the newest
+    # one, so a leftover build of an older version is not run instead.
+    jars = [p for p in (java_dir / "target").glob("ossie-databricks-converter-*.jar")
+            if not p.stem.endswith(("-sources", "-javadoc", "-tests"))]
+    if not jars:
+        return _java_env_failure("jar does not exist; mvn clean package")
+    jar = max(jars, key=lambda p: p.stat().st_mtime)
+    r = run(java_dir, [java, "-jar", str(jar), "export", str(ossie), "-o", str(dest)])
+    if r.returncode != 0:
+        if "UnsupportedClassVersionError" in r.stderr:
+            return _java_env_failure("java 21+ does not exist (older JVM)")
+        # The CLI's error is its first stderr line (a YAML error adds indented context
+        # below it), while the note column shows the last line, so keep just the error.
+        error = (r.stderr.strip().splitlines() or [""])[0]
+        return subprocess.CompletedProcess(r.args, r.returncode, r.stdout, error)
+    return subprocess.CompletedProcess(r.args, r.returncode, r.stdout,
+                                       _label_notices(r.stderr))
+
+
+# Spokes whose SPOKES argv is None, by name.
+_RUNNERS = {"databricks": _run_databricks, "gooddata": _run_gooddata}
+
+
 def cube_to_ossie(root, model_dir, dest):
     r = run(root / "converters/cube",
             ["uv", "run", "--quiet", "ossie-cube", "import",
@@ -245,7 +304,7 @@ def main():
                 continue
             dest = out / (name if is_dir else f"{name}.out")
             if argv is None:
-                r = _run_gooddata(root, ossie, dest)
+                r = _RUNNERS[name](root, ossie, dest)
             else:
                 r = run(root / "converters" / name,
                         ["uv", "run", "--quiet", *argv,
