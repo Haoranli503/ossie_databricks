@@ -196,6 +196,29 @@ ossieToSf.convert(Paths.get("input/model.yaml"), Paths.get("output/"));
 | `ai_context` | `businessPreferences` |
 | `custom_extensions` (vendor: `SALESFORCE`) | Restored properties |
 
+### Required Salesforce Properties
+
+The semantic model API rejects a payload that omits the model's `dataspace` or a
+data object's `dataObjectType`. Neither has an Ossie equivalent, so export
+supplies them:
+
+| Salesforce | Exported value |
+|------------|----------------|
+| `dataspace` | `default`, the dataspace every Data Cloud org provisions |
+| `semanticDataObjects[].dataObjectType` | `Dmo` when `dataObjectName` ends in `__dlm`, otherwise `Dlo` |
+
+Data Cloud suffixes a data object's name with the kind of object it is, so the
+dataset's `source` already carries the reference type: `Orders__dll` is a data
+lake object and `Orders__dlm` a data model object. A name with neither suffix
+came from outside Data Cloud, such as a Snowflake table or a dbt model, and lands
+in a data lake object once ingested. A `SALESFORCE` custom extension restored
+from an imported model takes precedence over both defaults.
+
+Note that the published schema's `dataObjectType` enum is narrower than the API
+it documents: it lists `Dlo` and `Query`, while API v67.0 accepts `Dlo` and `Dmo`
+and rejects `Query`. Import therefore rejects a model backed by a data model
+object until the published schema catches up.
+
 ### Data Types
 
 Salesforce imports map field and calculated-measurement types to Ossie's portable
