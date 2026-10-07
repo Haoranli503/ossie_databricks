@@ -287,6 +287,81 @@ class OssieToSalesforceConverterTest {
     }
 
     @Test
+    void testFieldWhoseColumnNameIsASqlKeywordIsNotDroppedAsCalculated() throws Exception {
+        // A warehouse column may legitimately be named DATE, MONTH or COUNT. Such a field is a
+        // direct reference, not a calculation, and must still reach the data object.
+        String yamlWithKeywordColumn = ossieYaml.replace("\r\n", "\n")
+                .replace("        expression: product_name__c\n", "        expression: DATE\n");
+        assertFalse(yamlWithKeywordColumn.contains("expression: product_name__c"),
+                "fixture text substitution did not match");
+
+        List<String> results = converter.convert(yamlWithKeywordColumn);
+        Map<String, Object> sfModel = jsonMapper.readValue(results.get(0), new TypeReference<Map<String, Object>>() {});
+
+        List<Map<String, Object>> dataObjects = (List<Map<String, Object>>) sfModel.get("semanticDataObjects");
+        Map<String, Object> productsDataset = dataObjects.stream()
+                .filter(d -> "Products".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(productsDataset);
+
+        List<Map<String, Object>> productDimensions =
+                (List<Map<String, Object>>) productsDataset.get("semanticDimensions");
+        Map<String, Object> productName = productDimensions.stream()
+                .filter(d -> "product_name".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(productName, "a dimension whose column is named DATE must not be dropped");
+        assertEquals("DATE", productName.get("dataObjectFieldName"),
+                "the keyword-named column should be carried through as a direct reference");
+
+        List<Map<String, Object>> calculatedDimensions =
+                (List<Map<String, Object>>) sfModel.get("semanticCalculatedDimensions");
+        if (calculatedDimensions != null) {
+            assertTrue(calculatedDimensions.stream()
+                            .noneMatch(d -> "product_name".equals(d.get("apiName"))),
+                    "a keyword-named column must not be routed to calculated dimensions");
+        }
+    }
+
+    @Test
+    void testTableauQuotedLiteralIsStillCalculated() throws Exception {
+        // Double quotes delimit an identifier in SQL but a string literal in Tableau, so a
+        // Tableau expression such as "Not Available" is a constant, not a column reference,
+        // and must still be routed to the calculated dimensions.
+        String yamlWithTableauLiteral = ossieYaml.replace("\r\n", "\n")
+                .replace("      - dialect: ANSI_SQL\n"
+                        + "        expression: product_name__c\n",
+                        "      - dialect: TABLEAU\n"
+                        + "        expression: '\"Not Available\"'\n");
+        assertFalse(yamlWithTableauLiteral.contains("expression: product_name__c"),
+                "fixture text substitution did not match");
+
+        List<String> results = converter.convert(yamlWithTableauLiteral);
+        Map<String, Object> sfModel = jsonMapper.readValue(results.get(0), new TypeReference<Map<String, Object>>() {});
+
+        List<Map<String, Object>> calculatedDimensions =
+                (List<Map<String, Object>>) sfModel.get("semanticCalculatedDimensions");
+        assertNotNull(calculatedDimensions);
+        Map<String, Object> productName = calculatedDimensions.stream()
+                .filter(d -> "product_name".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(productName, "a Tableau quoted literal must be exported as a calculated dimension");
+        assertEquals("\"Not Available\"", productName.get("expression"));
+
+        List<Map<String, Object>> dataObjects = (List<Map<String, Object>>) sfModel.get("semanticDataObjects");
+        Map<String, Object> productsDataset = dataObjects.stream()
+                .filter(d -> "Products".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(productsDataset);
+        assertTrue(((List<Map<String, Object>>) productsDataset.get("semanticDimensions")).stream()
+                        .noneMatch(d -> "product_name".equals(d.get("apiName"))),
+                "a Tableau quoted literal must not be exported as a direct column reference");
+    }
+
+    @Test
     void testFieldLabelDefaultsToApiNameWhenOssieHasNoLabel() throws Exception {
         // Normalize line endings first: the fixture file may check out with CRLF depending on
         // the platform's autocrlf setting, but the substitutions below are written with LF.

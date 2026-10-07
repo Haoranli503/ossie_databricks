@@ -52,6 +52,21 @@ public class FieldMappingHandler implements PipelineStep {
         "COUNT|SUM|AVG|MIN|MAX|DATE|YEAR|MONTH|DAY)\\b"
     );
 
+    // A bare SQL identifier: customer_name, DATE
+    private static final String BARE_IDENTIFIER = "[A-Za-z_][A-Za-z0-9_$]*";
+
+    // A SQL identifier, bare or double-quoted: customer_name, "Customer Name"
+    private static final String SQL_IDENTIFIER = "(?:" + BARE_IDENTIFIER + "|\"[^\"]+\")";
+
+    // A column reference, optionally qualified: column, table.column, schema.table.column
+    private static final Pattern IDENTIFIER_PATH_PATTERN =
+        Pattern.compile(SQL_IDENTIFIER + "(?:\\." + SQL_IDENTIFIER + ")*");
+
+    // The same reference in the Tableau dialect, where double quotes delimit a string literal
+    // rather than an identifier, so "Not Available" is a constant and not a column.
+    private static final Pattern BARE_IDENTIFIER_PATH_PATTERN =
+        Pattern.compile(BARE_IDENTIFIER + "(?:\\." + BARE_IDENTIFIER + ")*");
+
     private final ConversionDirection direction;
     private final CustomExtensionHandler customExtensionHandler;
 
@@ -299,12 +314,12 @@ public class FieldMappingHandler implements PipelineStep {
             String dialect = expressionInfo.dialect();
 
             // Skip calculated fields for non-Tableau dialects till we agree on a common dialect.
-            if (!DIALECT_TABLEAU.equals(dialect) && isCalculatedExpression(expression)) {
+            if (!DIALECT_TABLEAU.equals(dialect) && isCalculatedExpression(expression, dialect)) {
                 continue;
             }
 
             // Check if this is a calculated field (Tableau dialect with calculated expression)
-            boolean isCalculated = DIALECT_TABLEAU.equals(dialect) && isCalculatedExpression(expression);
+            boolean isCalculated = DIALECT_TABLEAU.equals(dialect) && isCalculatedExpression(expression, dialect);
 
             if (isCalculated) {
                 // Create a semantic calculated dimension
@@ -504,10 +519,23 @@ public class FieldMappingHandler implements PipelineStep {
      * </ul>
      *
      * @param expression The SQL expression to evaluate
+     * @param dialect The dialect the expression is written in
      * @return true if calculated, false if direct reference
      */
-    private boolean isCalculatedExpression(String expression) {
+    private boolean isCalculatedExpression(String expression, String dialect) {
         if (expression == null || expression.isEmpty()) {
+            return false;
+        }
+
+        // An identifier path is always a direct reference, even when a segment spells a SQL
+        // keyword. Warehouses routinely expose columns named DATE, MONTH or COUNT. Double
+        // quotes delimit an identifier in SQL but a string literal in Tableau, so a quoted
+        // segment reads as a column everywhere except the Tableau dialect, where "Not
+        // Available" stays a calculation.
+        Pattern directReference = DIALECT_TABLEAU.equals(dialect)
+                ? BARE_IDENTIFIER_PATH_PATTERN
+                : IDENTIFIER_PATH_PATTERN;
+        if (directReference.matcher(expression.trim()).matches()) {
             return false;
         }
 

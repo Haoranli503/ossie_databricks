@@ -253,6 +253,21 @@ class MetricExportIntegrationTest {
     }
 
     @Test
+    void metricCanReferenceAFieldWhoseColumnNameIsASqlKeyword() throws Exception {
+        Map<String, Object> source = model("sales", List.of(metric("total", "ANSI_SQL", "SUM(orders.profit)")));
+        Map<String, Object> keywordColumn = field("profit", "Decimal");
+        keywordColumn.put("expression", Map.of("dialects", List.of(dialect("ANSI_SQL", "COUNT"))));
+        items(source, "datasets").get(0).put("fields", List.of(keywordColumn));
+
+        Map<String, Object> output = convertOne(source);
+
+        assertEquals(List.of("COUNT"), items(items(output, "semanticDataObjects").get(0),
+                "semanticMeasurements").stream().map(item -> item.get("dataObjectFieldName")).toList());
+        assertEquals("SUM([orders].[profit])",
+                items(output, "semanticCalculatedMeasurements").get(0).get("expression"));
+    }
+
+    @Test
     void duplicateMetricNamesAreRejectedBeforeExport() throws Exception {
         String input = document(List.of(model("sales", List.of(
                 metric("duplicated", "ANSI_SQL", "SUM(orders.profit)"),
