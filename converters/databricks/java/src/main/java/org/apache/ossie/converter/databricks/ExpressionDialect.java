@@ -41,11 +41,12 @@ import java.util.regex.Pattern;
  * counts as portable only if it is listed here and, where the Ossie spec defines its behavior,
  * Databricks evaluates it that way. Anything else stays {@code DATABRICKS}, which is always
  * correct because the expression came from a Metric View. The traps it guards against include
- * Databricks reading {@code "x"} as a string where portable SQL reads an identifier,
- * {@code 'a''b'} as two concatenated literals, backslash escapes in strings, {@code TIMESTAMP}
- * carrying the session time zone, and same-named functions with other Databricks meanings. It
- * does not check behavior the spec leaves open (integer division, NULL handling in CONCAT or
- * GREATEST, rounding of ties, the timestamp type DATE_TRUNC and DATEADD return).
+ * Databricks reading {@code "x"} as a string where portable SQL reads an identifier, a doubled
+ * quote in {@code 'a''b'} that a legacy Databricks setting reads as two concatenated literals,
+ * backslash escapes in strings, {@code TIMESTAMP} carrying the session time zone, and same-named
+ * functions with other Databricks meanings. It does not check behavior the spec leaves open, such
+ * as integer division, NULL handling in CONCAT or GREATEST, rounding of ties, or the timestamp
+ * type DATE_TRUNC and DATEADD return.
  */
 final class ExpressionDialect {
 
@@ -75,6 +76,14 @@ final class ExpressionDialect {
       "CURRENT_DATE", "CURRENT_TIMESTAMP", "EXTRACT", "CAST", "COALESCE", "NULLIF", "UPPER",
       "LOWER", "TRIM", "SUBSTRING", "POSITION", "CHAR_LENGTH", "CHARACTER_LENGTH", "OCTET_LENGTH",
       "ABS", "MOD", "LN", "EXP", "POWER", "SQRT", "FLOOR", "CEIL", "CEILING");
+
+  // Aggregate calls (and the FILTER / WITHIN GROUP clauses that qualify one): in a measure, a bare
+  // name inside one is a column, while outside one it refers to another measure.
+  private static final Set<String> AGGREGATES = Set.of(
+      "SUM", "COUNT", "AVG", "MIN", "MAX", "STDDEV", "STDDEV_POP", "STDDEV_SAMP", "VARIANCE",
+      "VAR_POP", "VAR_SAMP", "MEDIAN", "PERCENTILE_CONT", "PERCENTILE_DISC",
+      "APPROX_COUNT_DISTINCT", "APPROX_PERCENTILE", "CORR", "COVAR_POP", "COVAR_SAMP", "EVERY",
+      "FILTER", "GROUP");
 
   // Argument counts the portable form allows, for functions whose other Databricks forms mean
   // something else (one-argument LOG = LN, COUNT(a, b) counting rows where all are non-null,
@@ -130,13 +139,14 @@ final class ExpressionDialect {
       "SELECT", "WITH", "UNION", "EXCEPT", "INTERSECT", "HAVING", "JOIN", "LATERAL", "INTERVAL",
       "EXISTS", "ARRAY", "MAP", "STRUCT", "RLIKE", "REGEXP", "DIV", "ANY", "SOME", "ALL",
       "QUALIFY", "LIMIT", "WINDOW", "VALUES", "TABLE", "OVER", "FILTER", "GROUP", "CURRENT_USER",
-      "USER", "SESSION_USER");
+      "USER", "SESSION_USER", "CURRENT_TIME", "LOCALTIME", "GROUPING__ID");
 
   private static final List<String> SYMBOLS = List.of(
       "<>", "<=", ">=", "!=", "||", "<", ">", "=", "+", "-", "*", "/", "%", "(", ")", ",", ".");
-  // Databricks-only operators and comments, checked before SYMBOLS can match a prefix of them.
+  // Databricks-only operators (shifts included) and comments, checked before SYMBOLS can match a
+  // prefix of them.
   private static final List<String> REJECTED_SYMBOLS = List.of(
-      "<=>", "==", "->", "=>", "--", "/*");
+      "<=>", "==", "->", "=>", "<<", ">>", "--", "/*");
   private static final Pattern NUMBER =
       Pattern.compile("(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?");
 
@@ -148,14 +158,18 @@ final class ExpressionDialect {
    * @param datasets lower-cased dataset names of the Apache Ossie model; {@code a.b} is portable
    *     only when {@code a} is one of them (not {@code source.}, a join alias, or a struct)
    * @param opaqueNames lower-cased names whose meaning comes from the Metric View rather than a
-   *     column (parameters, dimensions shadowing a column); a bare reference to one is not portable
+   *     column (parameters, dimensions shadowing a column); a reference to one, bare or as
+   *     {@code dataset.name}, is not portable
+   * @param measure whether {@code expr} is a measure, where a name outside an aggregate call
+   *     refers to another measure rather than a column, so it is not portable
    */
-  static String classify(String expr, Set<String> datasets, Set<String> opaqueNames) {
+  static String classify(
+      String expr, Set<String> datasets, Set<String> opaqueNames, boolean measure) {
     List<Token> tokens = expr == null ? null : tokenize(expr);
     if (tokens == null || tokens.isEmpty()) {
       return DIALECT_DATABRICKS;
     }
-    Scan scan = new Scan(tokens, datasets, opaqueNames);
+    Scan scan = new Scan(tokens, datasets, opaqueNames, measure);
     if (!scan.run()) {
       return DIALECT_DATABRICKS;
     }
@@ -193,8 +207,9 @@ final class ExpressionDialect {
           return null;
         }
         String body = s.substring(i + 1, end);
-        // A backslash escape, or a doubled quote ('a''b' is two concatenated literals in
-        // Databricks but one literal with a quote in standard SQL), reads differently.
+        // A backslash escape reads differently, and so can a doubled quote: 'a''b' is one
+        // literal with a quote in standard SQL, but two concatenated literals under a legacy
+        // Databricks setting.
         if (body.indexOf('\\') >= 0 || (end + 1 < n && s.charAt(end + 1) == '\'')) {
           return null;
         }
@@ -260,6 +275,7 @@ final class ExpressionDialect {
     private final List<Token> tokens;
     private final Set<String> datasets;
     private final Set<String> opaqueNames;
+    private final boolean measure;
     private final Deque<Frame> frames = new ArrayDeque<>();
     private String pendingOpener = "";
     boolean ossie = true;
@@ -268,19 +284,22 @@ final class ExpressionDialect {
     /** A parenthesized group: the word that opened it, and its top-level argument shape. */
     private static final class Frame {
       final String opener;
+      final boolean aggregate;
       int commas;
       boolean empty = true;
       boolean keywordForm; // EXTRACT ... FROM, POSITION ... IN, FILTER (WHERE ...), and so on
 
       Frame(String opener) {
         this.opener = opener;
+        this.aggregate = AGGREGATES.contains(opener);
       }
     }
 
-    Scan(List<Token> tokens, Set<String> datasets, Set<String> opaqueNames) {
+    Scan(List<Token> tokens, Set<String> datasets, Set<String> opaqueNames, boolean measure) {
       this.tokens = tokens;
       this.datasets = datasets;
       this.opaqueNames = opaqueNames;
+      this.measure = measure;
     }
 
     boolean run() {
@@ -401,13 +420,29 @@ final class ExpressionDialect {
 
     /** {@code dataset.field} is portable; any other head, deeper paths, or calls are not. */
     private boolean qualifiedName(int i, Token head) {
-      if (!datasets.contains(head.text.toLowerCase(Locale.ROOT))) {
+      if (!datasets.contains(head.text.toLowerCase(Locale.ROOT)) || !isColumnPosition()) {
         return false;
       }
       boolean twoParts = i + 2 < tokens.size() && tokens.get(i + 2).kind == Kind.IDENT;
       boolean deeper = i + 3 < tokens.size() && tokens.get(i + 3).is(".");
       boolean call = i + 3 < tokens.size() && tokens.get(i + 3).is("(");
-      return twoParts && !deeper && !call;
+      // `source.col` reads the raw column in Databricks, but `dataset.col` names the field when
+      // a dimension of that name shadows it.
+      return twoParts && !deeper && !call
+          && !opaqueNames.contains(tokens.get(i + 2).text.toLowerCase(Locale.ROOT));
+    }
+
+    /** False for a name in a measure outside an aggregate call, which refers to a measure. */
+    private boolean isColumnPosition() {
+      if (!measure) {
+        return true;
+      }
+      for (Frame f : frames) {
+        if (f.aggregate) {
+          return true;
+        }
+      }
+      return false;
     }
 
     private boolean call(String u, Token prev) {
@@ -509,7 +544,8 @@ final class ExpressionDialect {
           }
           // Any other identifier is a column, field, or date-part reference, unless its meaning
           // comes from the Metric View itself.
-          return isKeyword(u) || !opaqueNames.contains(t.text.toLowerCase(Locale.ROOT));
+          return isKeyword(u)
+              || (isColumnPosition() && !opaqueNames.contains(t.text.toLowerCase(Locale.ROOT)));
       }
     }
 

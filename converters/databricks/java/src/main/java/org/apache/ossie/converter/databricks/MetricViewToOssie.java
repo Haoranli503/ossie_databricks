@@ -82,6 +82,10 @@ final class MetricViewToOssie {
   private static final Pattern NON_EQUI_RE = Pattern.compile("[<>!]=|<>|[<>]");
   private static final Pattern AND_SPLIT_RE = Pattern.compile("\\s+AND\\s+", Pattern.CASE_INSENSITIVE);
   private static final Pattern EQ_CLAUSE_RE = Pattern.compile("^\\s*(.+?)\\s*=\\s*(.+?)\\s*$");
+  // A fact wildcard expands to dimensions named after, and equal to, the fact's own columns.
+  private static final Pattern FACT_WILDCARD_RE = Pattern.compile(
+      "^\\s*(?:source\\s*\\.\\s*)?\\*(?:\\s+EXCEPT\\s*\\(.*\\))?\\s*$",
+      Pattern.CASE_INSENSITIVE);
 
   private MetricViewToOssie() {}
 
@@ -195,7 +199,8 @@ final class MetricViewToOssie {
     for (Map<String, Object> d : datasets) {
       datasetNames.add(((String) d.get("name")).toLowerCase(Locale.ROOT));
     }
-    DialectScope scope = new DialectScope(datasetNames, viewDefinedNames(view, dims));
+    DialectScope scope =
+        new DialectScope(datasetNames, viewDefinedNames(view, dims), hasHiddenNames(dims));
     for (Object dimObj : dims) {
       Map<String, Object> dim = asMap(dimObj);
       if (isWildcard(dim)) {
@@ -462,7 +467,7 @@ final class MetricViewToOssie {
 
     Map<String, Object> field = new LinkedHashMap<>();
     field.put("name", name);
-    field.put("expression", dialectExpr(ossieExpr, scope.dialectOf(ossieExpr, name)));
+    field.put("expression", dialectExpr(ossieExpr, scope.dialectOf(ossieExpr, name, false)));
     if (truthy(get(dim, "comment"))) {
       field.put("description", get(dim, "comment"));
     }
@@ -534,7 +539,7 @@ final class MetricViewToOssie {
     boolean portable =
         !filtered && !measure.containsKey("window") && !measure.containsKey("partition");
     metric.put("expression",
-        dialectExpr(expr, portable ? scope.dialectOf(expr, name) : DIALECT_DATABRICKS));
+        dialectExpr(expr, portable ? scope.dialectOf(expr, name, true) : DIALECT_DATABRICKS));
     if (truthy(get(measure, "comment"))) {
       metric.put("description", get(measure, "comment"));
     }
@@ -598,14 +603,36 @@ final class MetricViewToOssie {
     return names;
   }
 
-  /** What an expression may name besides a column, for labeling its dialect (ExpressionDialect). */
-  private record DialectScope(Set<String> datasets, Set<String> viewNames) {
+  /**
+   * Whether a dimension has no name and is not a fact wildcard: a joined wildcard such as
+   * {@code customer.*}, or a derived name, adds dimensions this import cannot see, and any of them
+   * may shadow a column of the same name.
+   */
+  private static boolean hasHiddenNames(List<Object> dims) {
+    for (Object d : dims) {
+      Map<String, Object> dim = asMap(d);
+      String expr = str(get(dim, "expr"));
+      if (isWildcard(dim) && (expr == null || !FACT_WILDCARD_RE.matcher(expr).matches())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * What an expression may name besides a column, for labeling its dialect (ExpressionDialect).
+   * With {@code hiddenNames}, any bare name may be a dimension, so nothing is portable.
+   */
+  private record DialectScope(Set<String> datasets, Set<String> viewNames, boolean hiddenNames) {
     /** The most portable dialect for the expression of the column {@code self}. */
-    String dialectOf(String expr, String self) {
+    String dialectOf(String expr, String self, boolean measure) {
+      if (hiddenNames) {
+        return DIALECT_DATABRICKS;
+      }
       // A column naming itself refers to the source column, not to itself.
       Set<String> opaque = new HashSet<>(viewNames);
       opaque.remove(self.toLowerCase(Locale.ROOT));
-      return ExpressionDialect.classify(expr, datasets, opaque);
+      return ExpressionDialect.classify(expr, datasets, opaque, measure);
     }
   }
 }

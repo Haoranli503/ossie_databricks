@@ -1714,7 +1714,8 @@ public class OssieConverterSuite {
   @Test
   public void importKeepsNamesDefinedByTheViewDatabricks() {
     // Portable only when every name is a column or `dataset.column`: a parameter, a dimension
-    // that may shadow a column, the `source.` fact alias, and a struct field are not.
+    // that may shadow a column, the `source.` fact alias, and a struct field are not. A
+    // dimension naming itself (`status`) reads the source column.
     String mv =
         "version: '1.1'\n"
         + "source: c.s.orders\n"
@@ -1723,7 +1724,7 @@ public class OssieConverterSuite {
         + "joins:\n"
         + "- {name: customer, source: c.s.customer, on: source.o_custkey = customer.c_custkey}\n"
         + "dimensions:\n"
-        + "- {name: status, expr: UPPER(o_status)}\n"
+        + "- {name: status, expr: UPPER(status)}\n"
         + "- {name: status_code, expr: 'LEFT(status, 1)'}\n"
         + "- {name: source_status, expr: UPPER(source.o_status)}\n"
         + "- {name: city, expr: address.city}\n"
@@ -1734,6 +1735,57 @@ public class OssieConverterSuite {
     assertEquals(Map.of("status", "OSSIE_SQL_2026", "status_code", "DATABRICKS",
         "source_status", "DATABRICKS", "city", "DATABRICKS", "customer_name", "OSSIE_SQL_2026",
         "big_orders", "DATABRICKS", "revenue", "OSSIE_SQL_2026"), dialectsByName(mv));
+  }
+
+  @Test
+  public void importKeepsMeasureReferencesAndShadowedQualifiedColumnsDatabricks() {
+    // A bare name outside an aggregate refers to another measure, which may carry a window; and
+    // `source.o_amount` reads the raw column, where the Apache Ossie `orders.o_amount` would name
+    // the shadowing `o_amount` dimension.
+    String mv =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "joins:\n"
+        + "- {name: customer, source: c.s.customer, on: source.o_custkey = customer.c_custkey}\n"
+        + "dimensions:\n"
+        + "- {name: order_date, expr: o_date}\n"
+        + "- {name: o_amount, expr: o_amount * 100}\n"
+        + "- {name: c_acctbal, expr: customer.c_acctbal * 2}\n"
+        + "measures:\n"
+        + "- {name: cost, expr: SUM(cost)}\n"
+        + "- {name: row_count, expr: COUNT(*)}\n"
+        + "- {name: avg_cost, expr: cost / row_count}\n"
+        + "- name: running_cost\n"
+        + "  expr: SUM(cost)\n"
+        + "  window:\n"
+        + "  - {order: order_date, range: cumulative, semiadditive: last}\n"
+        + "- {name: running_x2, expr: running_cost * 2}\n"
+        + "- {name: raw_amount, expr: SUM(source.o_amount)}\n"
+        + "- {name: raw_balance, expr: SUM(customer.c_acctbal)}\n";
+    assertEquals(Map.of("order_date", "OSSIE_SQL_2026", "o_amount", "OSSIE_SQL_2026",
+        "c_acctbal", "OSSIE_SQL_2026", "cost", "OSSIE_SQL_2026", "row_count", "OSSIE_SQL_2026",
+        "avg_cost", "DATABRICKS", "running_cost", "DATABRICKS", "running_x2", "DATABRICKS",
+        "raw_amount", "DATABRICKS", "raw_balance", "DATABRICKS"), dialectsByName(mv));
+  }
+
+  @Test
+  public void importKeepsViewsWithUnseenDimensionNamesDatabricks() {
+    // A joined wildcard or a derived name adds dimensions the import cannot see, and any of them
+    // may shadow a column (`customer.*` adds `comment`), so nothing in the view is portable. A
+    // fact wildcard only adds the fact's own columns under their own names.
+    String head =
+        "version: '1.1'\n"
+        + "source: c.s.orders\n"
+        + "joins:\n"
+        + "- {name: customer, source: c.s.customer, on: source.o_custkey = customer.c_custkey}\n"
+        + "dimensions:\n"
+        + "- {name: status, expr: o_status}\n";
+    String measures = "measures:\n- {name: commenters, expr: COUNT(DISTINCT comment)}\n";
+    Map<String, String> hidden = Map.of("status", "DATABRICKS", "commenters", "DATABRICKS");
+    assertEquals(hidden, dialectsByName(head + "- expr: customer.*\n" + measures));
+    assertEquals(hidden, dialectsByName(head + "- expr: customer.comment\n" + measures));
+    assertEquals(Map.of("status", "OSSIE_SQL_2026", "commenters", "OSSIE_SQL_2026"),
+        dialectsByName(head + "- expr: source.*\n" + measures));
   }
 
   /** The dialect label of every field and metric imported from {@code mv}, by name. */

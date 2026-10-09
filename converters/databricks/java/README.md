@@ -136,14 +136,18 @@ An expression also stays `DATABRICKS` when:
 
 - it is a measure with a `window` or `partition`, or any measure of a view with a `filter`: those
   settings change the value and ride only in the `DATABRICKS` stash;
-- it names a parameter, or a dimension other than a plain same-named column, since the Metric View
-  may resolve that name to something other than a column;
-- it qualifies a name with anything but a dataset (the `source.` fact alias, a struct field);
+- it is a measure that names anything outside an aggregate call (`cost / row_count`), which the
+  Metric View resolves to another measure rather than a column;
+- it names a parameter, or a dimension other than a plain same-named column, bare or as
+  `dataset.name`, since the Metric View may resolve that name to something other than the column;
+- it belongs to a view with an unnamed dimension other than a fact wildcard (`*`, `source.*`),
+  such as `customer.*`, whose expanded names may shadow a column;
+- it qualifies a name with anything but a dataset (a struct field, or `source.` in a dimension);
 - it uses a construct whose Databricks behavior differs from the portable one, such as a window
   (`OVER`), `DATEDIFF`, a `VARCHAR`, `FLOAT`, or integer `CAST`, or a double-quoted name.
 
-The label does not account for behavior the Apache Ossie specification leaves open: integer
-division, `NULL` handling in `CONCAT` and `GREATEST`, rounding of ties, the result type of
+The label does not account for behavior the Apache Ossie specification leaves open, such as
+integer division, `NULL` handling in `CONCAT` and `GREATEST`, rounding of ties, the result type of
 `DATE_TRUNC` and `DATEADD`, and the unit names a date function accepts.
 
 ## Requirements

@@ -29,7 +29,13 @@ public class ExpressionDialectSuite {
 
   private static void assertDialect(String expected, String... expressions) {
     for (String expr : expressions) {
-      assertEquals(expected, ExpressionDialect.classify(expr, DATASETS, VIEW_NAMES), expr);
+      assertEquals(expected, ExpressionDialect.classify(expr, DATASETS, VIEW_NAMES, false), expr);
+    }
+  }
+
+  private static void assertMeasureDialect(String expected, String... expressions) {
+    for (String expr : expressions) {
+      assertEquals(expected, ExpressionDialect.classify(expr, DATASETS, VIEW_NAMES, true), expr);
     }
   }
 
@@ -55,6 +61,7 @@ public class ExpressionDialectSuite {
         "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY amount)",
         "DATEADD(day, 7, order_date)",
         "DATE '2024-01-15'",
+        "TIMESTAMP_NTZ '2024-01-15 10:00:00'",
         "POSITION('a' IN s)",
         "SUBSTRING(s, 2, 3)",
         "CURRENT_DATE()",
@@ -75,10 +82,26 @@ public class ExpressionDialectSuite {
   }
 
   @Test
+  public void aMeasureIsPortableOnlyWhenEveryNameSitsInAnAggregate() {
+    // Outside an aggregate call, a bare name in a measure refers to another measure.
+    assertMeasureDialect("OSSIE_SQL_2026",
+        "SUM(amount)",
+        "SUM(sales.amount) / NULLIF(COUNT(DISTINCT customer_id), 0)",
+        "SUM(CASE WHEN (a > 1) THEN b END) * 2",
+        "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY amount)");
+    assertMeasureDialect("ANSI_SQL", "SUM(amount) FILTER (WHERE amount > 0)");
+    assertMeasureDialect("DATABRICKS",
+        "total_cost / row_count",
+        "running_revenue * 2",
+        "SUM(amount) + sales.amount",
+        "DATEADD(day, 1, MAX(order_date))");
+  }
+
+  @Test
   public void databricksOnlyOrAmbiguousExpressionsStayDatabricks() {
     assertDialect("DATABRICKS",
-        // Databricks reads "x" as a string and 'a''b' as two concatenated literals, where
-        // portable SQL reads an identifier and one literal containing a quote.
+        // Databricks reads "x" as a string where portable SQL reads an identifier, and a legacy
+        // Databricks setting reads 'a''b' as two concatenated literals rather than one.
         "\"amount\"",
         "'it''s'",
         "'a' 'b'",
@@ -102,12 +125,23 @@ public class ExpressionDialectSuite {
         "SUM(x) total",
         "x IN (SELECT y FROM t)",
         "CURRENT_USER()",
+        "localtime",
+        "o_flags >> 3",
+        "x << 2",
+        // Each half fits only one portable dialect: CHAR_LENGTH is standard SQL outside the Ossie
+        // language, while CURRENT_DATE() and TIMESTAMP_NTZ are Ossie forms outside standard SQL.
+        "CHAR_LENGTH(s) > 0 AND d = CURRENT_DATE()",
+        "CHAR_LENGTH(s) > 0 AND d = TIMESTAMP_NTZ '2024-01-15 10:00:00'",
         // Names that are not a dataset column: the fact alias, a struct field, a parameter, and a
         // dimension that may shadow a column of the same name.
         "UPPER(source.o_status)",
         "address.city",
         "amount * p_region",
         "UPPER(status)",
+        "SUM(sales.status)",
+        "customer.address.city",
+        "UPPER(customer.nation.n_name)",
+        "customer.fn(x)",
         // Windows: Databricks sorts NULLs first by default, and the frame depends on query grain.
         "SUM(x) OVER (ORDER BY v)",
         "ROW_NUMBER() OVER (ORDER BY d NULLS LAST)",
