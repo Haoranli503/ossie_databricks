@@ -580,6 +580,34 @@ class OssieToSalesforceConverterTest {
     }
 
     @Test
+    void testCalculatedDimensionDeclaresTuaSyntax() throws Exception {
+        // Normalize line endings first: the fixture file may check out with CRLF depending on
+        // the platform's autocrlf setting, but the substitution below is written with LF.
+        // Tua is the only expression syntax the Salesforce semantic model API accepts; sending
+        // the dialect name rejects the whole model with "Invalid Expression Syntax Type".
+        String yamlWithTableauCalcDim = ossieYaml.replace("\r\n", "\n")
+                .replace("      - dialect: ANSI_SQL\n"
+                        + "        expression: YEAR([Orders].[order_date])\n",
+                        "      - dialect: TABLEAU\n"
+                        + "        expression: YEAR([Orders].[order_date])\n");
+        assertTrue(yamlWithTableauCalcDim.contains("dialect: TABLEAU"), "fixture text substitution did not match");
+
+        List<String> results = converter.convert(yamlWithTableauCalcDim);
+        Map<String, Object> sfModel = jsonMapper.readValue(results.get(0), new TypeReference<Map<String, Object>>() {});
+
+        List<Map<String, Object>> calcDimensions =
+                (List<Map<String, Object>>) sfModel.get("semanticCalculatedDimensions");
+        assertNotNull(calcDimensions, "the Tableau dialect should produce a semanticCalculatedDimension");
+        Map<String, Object> orderYear = calcDimensions.stream()
+                .filter(d -> "order_year".equals(d.get("apiName")))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(orderYear);
+        assertEquals("Tua", orderYear.get("syntax"),
+                "a calculated dimension must declare the Tua expression syntax");
+    }
+
+    @Test
     void testMetricsConvertedToSemanticCalculatedMeasurements() throws Exception {
         List<String> results = converter.convert(ossieYaml);
         Map<String, Object> sfModel = jsonMapper.readValue(results.get(0), new TypeReference<Map<String, Object>>() {});

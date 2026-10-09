@@ -414,8 +414,7 @@ public class FieldMappingHandler implements PipelineStep {
             calcDim.put(LABEL, label);
         }
 
-        // Set syntax for Tableau expressions
-        calcDim.put("syntax", DIALECT_TABLEAU);
+        calcDim.put(SYNTAX, SYNTAX_TUA);
 
         return calcDim;
     }
