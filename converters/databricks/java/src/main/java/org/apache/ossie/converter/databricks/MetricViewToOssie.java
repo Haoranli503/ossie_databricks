@@ -191,6 +191,11 @@ final class MetricViewToOssie {
       fieldsByDataset.put((String) d.get("name"), new ArrayList<>());
     }
     List<Object> dims = !dimList.isEmpty() ? dimList : fieldList;
+    Set<String> datasetNames = new HashSet<>();
+    for (Map<String, Object> d : datasets) {
+      datasetNames.add(((String) d.get("name")).toLowerCase(Locale.ROOT));
+    }
+    DialectScope scope = new DialectScope(datasetNames, viewDefinedNames(view, dims));
     for (Object dimObj : dims) {
       Map<String, Object> dim = asMap(dimObj);
       if (isWildcard(dim)) {
@@ -198,7 +203,7 @@ final class MetricViewToOssie {
             + "' has no Apache Ossie field representation; skipped");
         continue;
       }
-      Object[] converted = convertDimension(dim, aliasToDataset, factName);
+      Object[] converted = convertDimension(dim, aliasToDataset, factName, scope);
       fieldsByDataset.get((String) converted[0]).add(converted[1]);
     }
     for (Map<String, Object> d : datasets) {
@@ -211,6 +216,8 @@ final class MetricViewToOssie {
     List<Object> metrics = new ArrayList<>();
     // Fixed once the join tree is walked, so compile it once for all measures.
     Pattern aliasHead = qualifierChainPattern(aliasToDataset.keySet());
+    // A view filter changes every measure's value, and it rides only in the DATABRICKS stash.
+    boolean filtered = view.containsKey("filter");
     for (Object mObj : asList(get(view, "measures"))) {
       Map<String, Object> m = asMap(mObj);
       if (isWildcard(m)) {
@@ -218,7 +225,7 @@ final class MetricViewToOssie {
             + "' has no Apache Ossie metric representation; skipped");
         continue;
       }
-      metrics.add(convertMeasure(m, aliasHead, aliasToDataset));
+      metrics.add(convertMeasure(m, aliasHead, aliasToDataset, scope, filtered));
     }
 
     Map<String, Object> model = new LinkedHashMap<>();
@@ -445,8 +452,8 @@ final class MetricViewToOssie {
     return new String[] {null, operand};
   }
 
-  private static Object[] convertDimension(
-      Map<String, Object> dim, Map<String, String> aliasToDataset, String factName) {
+  private static Object[] convertDimension(Map<String, Object> dim,
+      Map<String, String> aliasToDataset, String factName, DialectScope scope) {
     String name = requireStr(dim, "name", "dimension");
     String expr = requireStr(dim, "expr", "dimension '" + name + "'");
     String[] resolved = resolveColumn(expr, aliasToDataset, factName);
@@ -455,7 +462,7 @@ final class MetricViewToOssie {
 
     Map<String, Object> field = new LinkedHashMap<>();
     field.put("name", name);
-    field.put("expression", dialectExpr(ossieExpr));
+    field.put("expression", dialectExpr(ossieExpr, scope.dialectOf(ossieExpr, name)));
     if (truthy(get(dim, "comment"))) {
       field.put("description", get(dim, "comment"));
     }
@@ -514,14 +521,20 @@ final class MetricViewToOssie {
    * and it is what {@code resolveColumn} already does for a dimension -- measures used to keep the
    * raw path, so a nested one survived only by accident.
    */
-  private static Map<String, Object> convertMeasure(
-      Map<String, Object> measure, Pattern aliasHead, Map<String, String> aliasToDataset) {
+  private static Map<String, Object> convertMeasure(Map<String, Object> measure,
+      Pattern aliasHead, Map<String, String> aliasToDataset, DialectScope scope,
+      boolean filtered) {
     String name = requireStr(measure, "name", "measure");
     String rawExpr = requireStr(measure, "expr", "measure '" + name + "'");
     String expr = rewriteQualifiers(rawExpr, aliasHead, aliasToDataset::get);
     Map<String, Object> metric = new LinkedHashMap<>();
     metric.put("name", name);
-    metric.put("expression", dialectExpr(expr));
+    // A window, partition, or view filter changes the measure's value and rides only in the
+    // DATABRICKS stash; a portable label would let another tool compute a plain aggregate instead.
+    boolean portable =
+        !filtered && !measure.containsKey("window") && !measure.containsKey("partition");
+    metric.put("expression",
+        dialectExpr(expr, portable ? scope.dialectOf(expr, name) : DIALECT_DATABRICKS));
     if (truthy(get(measure, "comment"))) {
       metric.put("description", get(measure, "comment"));
     }
@@ -545,9 +558,10 @@ final class MetricViewToOssie {
     return metric;
   }
 
-  private static Map<String, Object> dialectExpr(String expr) {
+  /** An Apache Ossie expression with the single dialect entry {@code label: expr}. */
+  private static Map<String, Object> dialectExpr(String expr, String label) {
     Map<String, Object> dialect = new LinkedHashMap<>();
-    dialect.put("dialect", DIALECT_DATABRICKS);
+    dialect.put("dialect", label);
     dialect.put("expression", expr);
     List<Object> dialects = new ArrayList<>();
     dialects.add(dialect);
@@ -558,5 +572,40 @@ final class MetricViewToOssie {
 
   private static boolean isWildcard(Map<String, Object> col) {
     return !col.containsKey("name");
+  }
+
+  /**
+   * Lower-cased bare names whose meaning comes from the view rather than a column: parameters, and
+   * dimensions other than a plain same-named column (a later expression naming one may resolve to
+   * the dimension instead of the column).
+   */
+  private static Set<String> viewDefinedNames(Map<String, Object> view, List<Object> dims) {
+    Set<String> names = new HashSet<>();
+    for (Object p : asList(get(view, "parameters"))) {
+      String name = str(get(asMap(p), "name"));
+      if (name != null) {
+        names.add(name.toLowerCase(Locale.ROOT));
+      }
+    }
+    for (Object d : dims) {
+      Map<String, Object> dim = asMap(d);
+      String name = str(get(dim, "name"));
+      String expr = str(get(dim, "expr"));
+      if (name != null && (expr == null || !expr.trim().equalsIgnoreCase(name.trim()))) {
+        names.add(name.toLowerCase(Locale.ROOT));
+      }
+    }
+    return names;
+  }
+
+  /** What an expression may name besides a column, for labeling its dialect (ExpressionDialect). */
+  private record DialectScope(Set<String> datasets, Set<String> viewNames) {
+    /** The most portable dialect for the expression of the column {@code self}. */
+    String dialectOf(String expr, String self) {
+      // A column naming itself refers to the source column, not to itself.
+      Set<String> opaque = new HashSet<>(viewNames);
+      opaque.remove(self.toLowerCase(Locale.ROOT));
+      return ExpressionDialect.classify(expr, datasets, opaque);
+    }
   }
 }
